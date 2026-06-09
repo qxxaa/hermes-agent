@@ -1475,6 +1475,10 @@ def init_agent(
     
     # Track conversation messages for session logging
     agent._session_messages: List[Dict[str, Any]] = []
+    # Plugin context engines can opt into per-agent cloning.  When a clone is
+    # created, this agent owns its lifecycle and may close it during teardown;
+    # shared registered engines must stay alive for other cached agents.
+    agent._owns_context_engine = False
     # Responses encrypted reasoning replay state.  Some OpenAI-compatible
     # routes accept GPT-5 Responses requests but later reject replayed
     # encrypted reasoning blobs (HTTP 400 ``invalid_encrypted_content``).
@@ -2320,7 +2324,24 @@ def init_agent(
     # else: config says "compressor" — use built-in, don't auto-activate plugins
 
     if _selected_engine is not None:
-        agent.context_compressor = _selected_engine
+        _registered_engine = _selected_engine
+        try:
+            _agent_engine = _registered_engine.clone_for_agent()
+        except Exception as _ce_clone_err:
+            _ra().logger.warning(
+                "Context engine '%s' failed to clone for agent — using registered instance: %s",
+                getattr(_registered_engine, "name", _engine_name),
+                _ce_clone_err,
+            )
+            _agent_engine = _registered_engine
+        if _agent_engine is None:
+            _ra().logger.warning(
+                "Context engine '%s' returned None from clone_for_agent — using registered instance",
+                getattr(_registered_engine, "name", _engine_name),
+            )
+            _agent_engine = _registered_engine
+        agent._owns_context_engine = _agent_engine is not _registered_engine
+        agent.context_compressor = _agent_engine
         # External engines own compaction policy: the host compression
         # threshold (including the Codex gpt-5.5 autoraise above) only
         # configures the built-in ContextCompressor and never reaches the
