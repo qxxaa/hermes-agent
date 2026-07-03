@@ -3658,8 +3658,8 @@ def copilot_model_api_mode(
                 for endpoint in (catalog_entry.get("supported_endpoints") or [])
                 if str(endpoint).strip()
             }
-            # For non-GPT-5 models, check if they only support messages API
-            if "/v1/messages" in supported_endpoints and "/chat/completions" not in supported_endpoints:
+            # For non-GPT-5 models, check if they support messages API
+            if "/v1/messages" in supported_endpoints:
                 return "anthropic_messages"
 
     return "chat_completions"
