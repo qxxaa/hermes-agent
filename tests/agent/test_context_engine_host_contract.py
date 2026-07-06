@@ -42,6 +42,12 @@ class _ContractEngine(ContextEngine):
         self.session_start_calls: list[tuple[str, dict[str, object]]] = []
         self.shutdown_count = 0
 
+    def __deepcopy__(self, memo):
+        # Real plugin engines hold uncopyable state (locks, DB connections).
+        # clone_for_agent() is the engine-controlled isolation path;
+        # generic deepcopy must return self so the host falls through to it.
+        return self
+
     @property
     def name(self) -> str:
         return self._name
