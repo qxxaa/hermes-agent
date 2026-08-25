@@ -688,13 +688,30 @@ class _CodexResponseAssembler:
         # Reuse the announced position when known (fresh tail sequence for unannounced items); the .done
         # event's own output_index wins over the announced one.
         done_id = str(_event_field(done_item, "id", ""))
+        done_call_id = str(_event_field(done_item, "call_id", "") or "")
+        pending_aliases = []
+        if done_call_id:
+            pending_aliases = [
+                (pending_id, pending)
+                for pending_id, pending in self.pending_function_calls.items()
+                if str(_event_field(pending.get("item"), "call_id", "") or "") == done_call_id
+            ]
         announced_sequence, announced_index = self.announced_output_order.get(done_id, (None, None))
+        if announced_sequence is None and pending_aliases:
+            _, announced_alias = min(pending_aliases, key=lambda alias: alias[1]["sequence"])
+            announced_sequence = announced_alias["sequence"]
+            announced_index = announced_alias["output_index"]
+        done_index = _event_field(event, "output_index", None)
+        if done_index is None:
+            done_index = announced_index
         if announced_sequence is None:
             announced_sequence, self.next_output_sequence = self.next_output_sequence, self.next_output_sequence + 1
-        self.output_indexes.append(_event_field(event, "output_index", announced_index))
+        self.output_indexes.append(done_index)
         self.output_sequences.append(announced_sequence)
-        # Confirmed by the authoritative done event; never settle it twice.
+        # A done item may use another item id; remove pending aliases of its authoritative call_id too.
         self.pending_function_calls.pop(done_id, None)
+        for pending_id, _pending in pending_aliases:
+            self.pending_function_calls.pop(pending_id, None)
         if _message_phase(done_item) == "commentary" and self.on_commentary_message is not None:
             commentary_text = "".join(self.commentary_text_deltas).strip() or _output_text_of(done_item)
             if commentary_text:
@@ -762,9 +779,9 @@ class _CodexResponseAssembler:
         if not output and self.text_deltas and not self.has_tool_calls:
             content = [SimpleNamespace(type="output_text", text="".join(self.text_deltas))]
             output = [SimpleNamespace(type="message", role="assistant", status="completed", content=content)]
-        # Done items stay authoritative; settlement only fills the gap left by backends that omit
-        # per-item done events on a successful completion.
-        if self.pending_function_calls and self.saw_response_completed:
+        # Done items stay authoritative. Preserve announced order even when every pending alias
+        # was confirmed; only unconfirmed calls need settlement on a successful completion.
+        if self.saw_response_completed and (self.output_items or self.pending_function_calls):
             output = self._settled_output()
         # No terminal frame AND no usable content = truncated / rejected stream.
         if not self.saw_terminal and not output:
