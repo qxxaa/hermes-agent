@@ -19,6 +19,7 @@ import asyncio
 import concurrent.futures
 import inspect
 import logging
+import re
 import queue
 import secrets
 import threading
@@ -357,6 +358,7 @@ class GatewayStreamConsumer:
         # Think-block filter state (mirrors CLI's _stream_delta tag suppression)
         self._in_think_block = False
         self._think_buffer = ""
+        self._dcp_hold = ""  # partial DCP tag hold-back across chunk boundaries
 
         # Native draft-streaming state.  Resolved at the start of run() based
         # on cfg.transport, cfg.chat_type, and the adapter's
@@ -576,6 +578,42 @@ class GatewayStreamConsumer:
         """Append to the live buffer and the split-stable stream ledger."""
         if not text:
             return
+        # Rejoin any held-back partial DCP tag from previous chunk
+        if self._dcp_hold:
+            text = self._dcp_hold + text
+            self._dcp_hold = ""
+        text = self._strip_dcp_markers(text)
+        if not text:
+            return
+        # Hold back a trailing partial DCP tag that the regex can't match yet.
+        # Covers both short prefixes (<, <d, <dcp-) and longer unclosed tags
+        # (<dcp-ref id="m0870" /) that arrive split across chunks.
+        _DCP_PREFIXES = ("<dcp-", "[DCP:")
+        for prefix in _DCP_PREFIXES:
+            plen = len(prefix)
+            # Short prefix at very end of chunk
+            for i in range(1, plen + 1):
+                if text.endswith(prefix[:i]):
+                    self._dcp_hold = text[-i:]
+                    text = text[:-i]
+                    break
+            if self._dcp_hold:
+                break
+        # Unclosed long tag: <dcp-... without matching />
+        if not self._dcp_hold and "<dcp-" in text:
+            last_open = text.rfind("<dcp-")
+            close_pos = text.find("/>", last_open)
+            if close_pos == -1:
+                self._dcp_hold = text[last_open:]
+                text = text[:last_open]
+        if not self._dcp_hold and "[DCP:" in text:
+            last_open = text.rfind("[DCP:")
+            close_pos = text.find("]", last_open + 5)
+            if close_pos == -1:
+                self._dcp_hold = text[last_open:]
+                text = text[:last_open]
+        if not text:
+            return
         # New text delta arriving: clear tool-progress overlay so the next
         # frame shows real content (Strategy B: text overwrites tool lines).
         if self._tool_progress_lines:
@@ -760,6 +798,8 @@ class GatewayStreamConsumer:
 
     def on_commentary(self, text: str) -> None:
         """Queue a completed interim assistant commentary message."""
+        if text:
+            text = self._strip_dcp_markers(text)
         if text:
             self._queue.put((_COMMENTARY, text))
 
@@ -1193,12 +1233,30 @@ class GatewayStreamConsumer:
                 i += 1
         return "".join(out)
 
+    _DCP_MARKER_RE = re.compile(
+        r'\s*<dcp-ref\s+id="[^"]*"\s*/>\s*'
+        r'|\s*<dcp-compressed-block[^>]*>.*?</dcp-compressed-block>\s*'
+        r'|\s*\[DCP: content moved into compressed block b\d+\.\]\s*',
+        re.DOTALL,
+    )
+
+    @classmethod
+    def _strip_dcp_markers(cls, text: str) -> str:
+        """Remove DCP metadata markers from model output before display."""
+        if "<dcp-" not in text and "[DCP:" not in text:
+            return text
+        return cls._DCP_MARKER_RE.sub('', text)
+
     def _flush_think_buffer(self) -> None:
         """Flush any held-back partial-tag buffer into accumulated text.
 
         Called when the stream ends (got_done) so that partial text that
         was held back waiting for a possible opening tag is not lost.
         """
+        # Flush DCP hold-back (partial tag that never completed)
+        if self._dcp_hold:
+            self._append_accumulated(self._dcp_hold)
+            self._dcp_hold = ""
         if self._think_buffer and not self._in_think_block:
             # Strip any orphan close tags that may have been held back —
             # see _filter_and_accumulate for context.
@@ -1325,7 +1383,7 @@ class GatewayStreamConsumer:
                                 _final_payload = self._clean_for_display(item[1])
                                 _visible = self._clean_for_display(self._accumulated)
                                 if _final_payload and _final_payload != _visible:
-                                    self._accumulated = item[1]
+                                    self._accumulated = self._strip_dcp_markers(item[1])
                                     self._stream_ledger = item[1]
                             elif _streamed_something and self._turn_split_delivery:
                                 # Split delivery + authoritative final (review
@@ -1351,7 +1409,9 @@ class GatewayStreamConsumer:
                                     and len(_final_raw) > len(_ledger)
                                 ):
                                     _suffix = _final_raw[len(_ledger):]
-                                    self._accumulated += _suffix
+                                    _suffix = self._strip_dcp_markers(_suffix)
+                                    if _suffix:
+                                        self._accumulated += _suffix
                                     self._stream_ledger = _final_raw
                             continue
                         if item is _REOPEN_SEED:
@@ -2038,7 +2098,8 @@ class GatewayStreamConsumer:
         stream finishes — we just need to hide the raw directives from the
         user.
         """
-        return _BasePlatformAdapter.strip_media_directives_for_display(text)
+        text = _BasePlatformAdapter.strip_media_directives_for_display(text)
+        return GatewayStreamConsumer._strip_dcp_markers(text)
 
     async def _send_new_chunk(
         self,
