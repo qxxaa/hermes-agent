@@ -59,6 +59,11 @@ def _is_opencode_endpoint(base_url: str | None) -> bool:
     return base_url_host_matches(base_url or "", "opencode.ai")
 
 
+def _is_github_copilot_anthropic_endpoint(base_url: str | None) -> bool:
+    """Return True for GitHub Copilot's Anthropic Messages relay."""
+    return base_url_host_matches(base_url or "", "githubcopilot.com")
+
+
 # Model-name prefixes that identify the Kimi / Moonshot family.  Covers
 # - official slugs: ``kimi-k2.5``, ``kimi_thinking``, ``moonshot-v1-8k``
 # - common release lines: ``k1.5-...``, ``k2-thinking``, ``k25-...``, ``k2.5-...``,
