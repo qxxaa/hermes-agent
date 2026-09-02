@@ -138,6 +138,9 @@ _CLONE_ALL_HISTORY_EXCLUDE_ROOT: frozenset[str] = frozenset({
     "backups",
     "state-snapshots",
     "checkpoints",
+    "dcp.db",
+    "dcp.db-wal",
+    "dcp.db-shm",
 })
 
 # Marker file written by `hermes profile create --no-skills`.  When present in
@@ -237,6 +240,8 @@ _DEFAULT_EXPORT_EXCLUDE_ROOT = frozenset({
     "browser_screenshots", "checkpoints",
     "sandboxes",
     "logs",                 # gateway logs
+    # DCP context engine database
+    "dcp.db", "dcp.db-shm", "dcp.db-wal",
 })
 
 # Allow-list for ``export_profile("default")``: when HERMES_HOME equals the

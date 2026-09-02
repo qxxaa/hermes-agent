@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import re
 import time
 from collections import defaultdict, deque
@@ -16,16 +17,21 @@ from agent.dcp_config import (
     parse_dcp_config,
     resolve_model_limit,
 )
+from agent.dcp_db import DCPRefDB
 from agent.dcp_state import CompressionBlock, DCPSessionState
+
+logger = logging.getLogger(__name__)
 
 _ERROR_RE = re.compile(r"\b(error|exception|traceback|failed|failure|timed out|timeout)\b", re.I)
 
 _DCP_SYSTEM_EXTENSION = (
     "DCP context management is active. Message refs look like m0001; "
     "compressed blocks look like b1. Use the compress tool when older work "
-    "is complete or stale. Preserve concrete file paths, commands, errors, "
-    "test results, decisions, constraints, and open questions. Do not compress "
-    "the active task or very recent user turns."
+    "is complete or stale. Use expand to retrieve original messages from "
+    "a compressed block when you need details the summary omitted. "
+    "Preserve concrete file paths, commands, errors, "
+    "test results, decisions, constraints, and open questions. Do not "
+    "compress the active task or very recent user turns."
 )
 
 # Maximum deactivated blocks to retain; older ones are evicted to bound memory.
@@ -63,6 +69,7 @@ class DCPContextEngine(ContextEngine):
         # the canonical message list changes.  Avoids re-hashing the same
         # dicts on every API call.
         self._sig_cache: dict[int, str] = {}
+        self._ref_db: DCPRefDB | None = None
 
     @property
     def name(self) -> str:
@@ -105,8 +112,27 @@ class DCPContextEngine(ContextEngine):
             self.context_length = context_length
             self.threshold_tokens = self._min_limit()
 
+        # Lazy init dcp.db and load persisted state
+        if self._ref_db is None:
+            from hermes_constants import get_hermes_home
+            import os
+            self._ref_db = DCPRefDB(
+                os.path.join(get_hermes_home(), "dcp.db")
+            )
+        try:
+            self._load_persisted_state(session_id)
+        except Exception:
+            logger.warning(
+                "DCP: failed to load persisted state, degrading to in-memory",
+                exc_info=True,
+            )
+            self._ref_db = None
+
     def on_session_reset(self) -> None:
         super().on_session_reset()
+        # Clear in-memory state only. Do NOT delete from dcp.db - the old
+        # session's data belongs to the old agent which is being discarded.
+        # A new agent with a new session_id will call on_session_start().
         self.state = DCPSessionState(session_id=self.state.session_id)
         self._sig_cache.clear()
 
@@ -124,19 +150,112 @@ class DCPContextEngine(ContextEngine):
         self.context_length = context_length
         self.threshold_tokens = self._min_limit()
 
+    # -- Persistence helpers ----------------------------------------------
+
+    def _load_persisted_state(self, session_id: str) -> None:
+        """Load blocks, refs, and counters from dcp.db into in-memory state."""
+        if not self._ref_db:
+            return
+
+        # Load session meta (counters, manual_mode, stats)
+        meta = self._ref_db.load_session_meta(session_id)
+        if meta:
+            self.state.next_message_ref = max(
+                self.state.next_message_ref, meta["next_message_ref"]
+            )
+            self.state.next_block_id = max(
+                self.state.next_block_id, meta["next_block_id"]
+            )
+            self.state.next_run_id = max(
+                self.state.next_run_id, meta["next_run_id"]
+            )
+            mm = meta.get("manual_mode", "false")
+            if mm == "compress-pending":
+                self.state.manual_mode = "compress-pending"
+            elif mm == "true":
+                self.state.manual_mode = True
+            else:
+                self.state.manual_mode = False
+            self.state.pending_manual_focus = meta.get(
+                "pending_manual_focus"
+            )
+            self.state.stats = meta.get("stats", {})
+
+        # Load ref mappings
+        ref_map = self._ref_db.load_refs(session_id)
+        self.state.ref_by_message_key = dict(ref_map)
+        self.state.message_key_by_ref = {
+            v: k for k, v in ref_map.items()
+        }
+
+        # Derive next_message_ref from persisted refs (crash safety)
+        for ref_str in ref_map.values():
+            if ref_str.startswith("m"):
+                try:
+                    num = int(ref_str[1:])
+                    self.state.next_message_ref = max(
+                        self.state.next_message_ref, num + 1
+                    )
+                except ValueError:
+                    pass
+
+        # Load blocks
+        block_rows = self._ref_db.load_blocks(session_id)
+        self.state.blocks_by_id.clear()
+        self.state.active_block_ids.clear()
+        for row in block_rows:
+            block = CompressionBlock(
+                block_id=row["block_id"],
+                run_id=row["run_id"],
+                mode=row.get("mode", "range"),
+                topic=row["topic"],
+                summary=row["summary"],
+                active=row["active"],
+                start_ref=row.get("start_ref"),
+                end_ref=row.get("end_ref"),
+                message_refs=row.get("message_refs", []),
+                included_block_ids=row.get("included_block_ids", []),
+                consumed_block_ids=row.get("consumed_block_ids", []),
+                created_at=row.get("created_at"),
+                deactivated_at=row.get("deactivated_at"),
+                deactivated_by_block_id=row.get(
+                    "deactivated_by_block_id"
+                ),
+            )
+            self.state.blocks_by_id[block.block_id] = block
+            if block.active:
+                self.state.active_block_ids.add(block.block_id)
+
+        # Derive counters from actual blocks to survive crash between
+        # save_block and _persist_session_meta
+        if block_rows:
+            max_bid = max(r["block_id"] for r in block_rows)
+            max_rid = max(r["run_id"] for r in block_rows)
+            self.state.next_block_id = max(
+                self.state.next_block_id, max_bid + 1
+            )
+            self.state.next_run_id = max(
+                self.state.next_run_id, max_rid + 1
+            )
+
     def get_tool_schemas(self) -> list[dict[str, Any]]:
         if not self.config.enabled or self.config.compress.permission == "deny":
             return []
-        return [self._compress_tool_schema()]
+        schemas = [self._compress_tool_schema()]
+        schemas.append(self._expand_tool_schema())
+        return schemas
 
     def handle_tool_call(self, name: str, args: dict[str, Any], **kwargs: Any) -> str:
-        if name != "compress":
-            return json.dumps({"ok": False, "error": f"Unknown context engine tool: {name}"})
         messages = kwargs.get("messages")
         if not isinstance(messages, list):
-            return json.dumps({"ok": False, "error": "compress requires current messages"})
+            return json.dumps({"ok": False, "error": f"{name} requires current messages"})
         try:
-            result = self._handle_compress(args, messages)
+            if name == "compress":
+                result = self._handle_compress(args, messages)
+            elif name == "expand":
+                result = self._handle_expand(args, messages)
+            else:
+                return json.dumps({"ok": False, "error": f"Unknown context engine tool: {name}"})
         except Exception as exc:
             return json.dumps({"ok": False, "error": str(exc)})
         return json.dumps(result)
@@ -158,7 +277,32 @@ class DCPContextEngine(ContextEngine):
 
         self.model = model or self.model
         self.provider = provider or self.provider
-        self.state.session_id = session_id or self.state.session_id
+
+        # Session rebind guard: detect in-process session switches
+        # (e.g. CLI /resume) that bypass on_session_start
+        incoming_sid = session_id or self.state.session_id
+        if (
+            incoming_sid
+            and self.state.session_id is not None
+            and incoming_sid != self.state.session_id
+        ):
+            logger.warning(
+                "DCP: session changed from %s to %s without on_session_start; rebinding",
+                self.state.session_id, incoming_sid,
+            )
+            self.state = DCPSessionState(session_id=incoming_sid)
+            self._sig_cache.clear()
+            if self._ref_db:
+                try:
+                    self._load_persisted_state(incoming_sid)
+                except Exception:
+                    logger.warning(
+                        "DCP: failed to load state for %s, degrading to in-memory",
+                        incoming_sid, exc_info=True,
+                    )
+                    self._ref_db = None
+        else:
+            self.state.session_id = incoming_sid
 
         # Build / refresh refs from canonical messages.  This also updates
         # turn counters and message-since-last-user tracking.
@@ -250,6 +394,27 @@ class DCPContextEngine(ContextEngine):
             },
         }
 
+    def _expand_tool_schema(self) -> dict[str, Any]:
+        return {
+            "name": "expand",
+            "description": (
+                "Retrieve original messages from a compressed block. "
+                "Use when you need details that the summary omitted."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "blockRef": {
+                        "type": "string",
+                        "description": (
+                            "The block ref to expand, e.g. b1 or b2."
+                        ),
+                    },
+                },
+                "required": ["blockRef"],
+            },
+        }
+
     # -- Tool handling ----------------------------------------------------
 
     def _handle_compress(self, args: dict[str, Any], messages: list[dict[str, Any]]) -> dict[str, Any]:
@@ -260,80 +425,278 @@ class DCPContextEngine(ContextEngine):
             raise ValueError("compress.content must be a non-empty array")
 
         is_message_mode = self.config.compress.mode == "message"
-        created: list[int] = []
-        deactivated: list[int] = []
+        all_created: list[int] = []
+        all_deactivated: list[int] = []
+        range_results: list[dict[str, Any]] = []
         run_id = self.state.new_run_id()
 
-        for item in content:
+        for i, item in enumerate(content):
             if not isinstance(item, dict):
-                raise ValueError("Each compression entry must be an object")
-            summary = self._require_str(item, "summary")
+                range_results.append({
+                    "range": i + 1, "status": "failed",
+                    "error": "Entry must be an object",
+                })
+                break
 
-            if is_message_mode:
-                ref = self._require_str(item, "messageId")
-                if ref not in self.state.index_by_ref:
-                    raise ValueError(f"Unknown message ref: {ref}")
-                item_topic = item.get("topic") if isinstance(item.get("topic"), str) else topic
-                message_refs = [ref]
-                included_blocks: list[int] = []
-                block = CompressionBlock(
-                    block_id=self.state.new_block_id(),
-                    run_id=run_id,
-                    mode="message",
-                    topic=item_topic,
-                    summary=self._augment_summary(summary, message_refs),
-                    message_refs=message_refs,
-                    included_block_ids=[],
-                    consumed_block_ids=[],
-                    created_at=time.time(),
-                )
-            else:
-                start_ref = self._require_str(item, "startId")
-                end_ref = self._require_str(item, "endId")
-                message_refs, included_blocks = self._resolve_range(start_ref, end_ref)
-                if not message_refs:
-                    raise ValueError(f"Range {start_ref}-{end_ref} does not cover any messages")
-                item_topic = topic
-                consumed_blocks: list[int] = []
-                block_id = self.state.new_block_id()
-                for included in included_blocks:
-                    old = self.state.blocks_by_id.get(included)
-                    if old and old.active:
-                        old.active = False
-                        old.deactivated_at = time.time()
-                        old.deactivated_by_block_id = block_id
-                        self.state.active_block_ids.discard(included)
-                        consumed_blocks.append(included)
-                        deactivated.append(included)
-                block = CompressionBlock(
-                    block_id=block_id,
-                    run_id=run_id,
-                    mode="range",
-                    topic=item_topic,
-                    summary=self._augment_summary(summary, message_refs),
-                    start_ref=start_ref,
-                    end_ref=end_ref,
-                    message_refs=message_refs,
-                    included_block_ids=included_blocks,
-                    consumed_block_ids=consumed_blocks,
-                    created_at=time.time(),
-                )
+            # Save state for single-range rollback
+            saved_next_block = self.state.next_block_id
+            saved_turns = self.state.turns_since_last_compress
+            saved_manual_mode = self.state.manual_mode
+            saved_manual_focus = self.state.pending_manual_focus
+            created_this: list[int] = []
+            deactivated_this: list[int] = []
 
-            self.state.blocks_by_id[block.block_id] = block
-            self.state.active_block_ids.add(block.block_id)
-            created.append(block.block_id)
+            try:
+                summary = self._require_str(item, "summary")
 
-        self.compression_count += len(created)
-        self.state.turns_since_last_compress = 0
+                if is_message_mode:
+                    ref = self._require_str(item, "messageId")
+                    if ref not in self.state.index_by_ref:
+                        raise ValueError(f"Unknown message ref: {ref}")
+                    item_topic = item.get("topic") if isinstance(item.get("topic"), str) else topic
+                    message_refs = [ref]
+                    block = CompressionBlock(
+                        block_id=self.state.new_block_id(),
+                        run_id=run_id,
+                        mode="message",
+                        topic=item_topic,
+                        summary=self._augment_summary(summary, message_refs),
+                        message_refs=message_refs,
+                        included_block_ids=[],
+                        consumed_block_ids=[],
+                        created_at=time.time(),
+                    )
+                else:
+                    start_ref = self._require_str(item, "startId")
+                    end_ref = self._require_str(item, "endId")
+                    message_refs, included_blocks = self._resolve_range(start_ref, end_ref)
+                    if not message_refs:
+                        raise ValueError(f"Range {start_ref}-{end_ref} does not cover any messages")
+                    item_topic = topic
+                    consumed_blocks: list[int] = []
+                    block_id = self.state.new_block_id()
+                    for included in included_blocks:
+                        old = self.state.blocks_by_id.get(included)
+                        if old and old.active:
+                            old.active = False
+                            old.deactivated_at = time.time()
+                            old.deactivated_by_block_id = block_id
+                            self.state.active_block_ids.discard(included)
+                            consumed_blocks.append(included)
+                            deactivated_this.append(included)
+                    block = CompressionBlock(
+                        block_id=block_id,
+                        run_id=run_id,
+                        mode="range",
+                        topic=item_topic,
+                        summary=self._augment_summary(summary, message_refs),
+                        start_ref=start_ref,
+                        end_ref=end_ref,
+                        message_refs=message_refs,
+                        included_block_ids=included_blocks,
+                        consumed_block_ids=consumed_blocks,
+                        created_at=time.time(),
+                    )
+
+                self.state.blocks_by_id[block.block_id] = block
+                self.state.active_block_ids.add(block.block_id)
+                created_this.append(block.block_id)
+
+                self.compression_count += 1
+                self.state.turns_since_last_compress = 0
+                self.state.manual_mode = False
+                self.state.pending_manual_focus = None
+
+                # Persist this range immediately
+                if self._ref_db and self.state.session_id:
+                    b = block
+                    mm_str = "false"
+                    self._ref_db.save_compress_batch(
+                        self.state.session_id,
+                        new_blocks=[{
+                            "block_id": b.block_id,
+                            "run_id": b.run_id,
+                            "mode": b.mode,
+                            "topic": b.topic,
+                            "summary": b.summary,
+                            "active": b.active,
+                            "start_ref": b.start_ref,
+                            "end_ref": b.end_ref,
+                            "message_refs": b.message_refs,
+                            "included_block_ids": b.included_block_ids,
+                            "consumed_block_ids": b.consumed_block_ids,
+                            "created_at": b.created_at,
+                        }],
+                        deactivations=[
+                            (bid,
+                             self.state.blocks_by_id[bid].deactivated_at,
+                             self.state.blocks_by_id[bid].deactivated_by_block_id)
+                            for bid in deactivated_this
+                            if bid in self.state.blocks_by_id
+                        ],
+                        meta={
+                            "next_message_ref": self.state.next_message_ref,
+                            "next_block_id": self.state.next_block_id,
+                            "next_run_id": self.state.next_run_id,
+                            "manual_mode": mm_str,
+                            "pending_manual_focus": None,
+                            "stats": self.state.stats,
+                        },
+                        ensure_refs=[
+                            (self.state.message_key_by_ref[r], r)
+                            for r in b.message_refs
+                            if r in self.state.message_key_by_ref
+                        ],
+                    )
+
+                all_created.extend(created_this)
+                all_deactivated.extend(deactivated_this)
+                range_results.append({
+                    "range": i + 1, "status": "ok",
+                    "ref": f"b{block.block_id}",
+                })
+
+            except Exception:
+                # Roll back just this range
+                for bid in created_this:
+                    self.state.blocks_by_id.pop(bid, None)
+                    self.state.active_block_ids.discard(bid)
+                for bid in deactivated_this:
+                    b = self.state.blocks_by_id.get(bid)
+                    if b:
+                        b.active = True
+                        b.deactivated_at = None
+                        b.deactivated_by_block_id = None
+                        self.state.active_block_ids.add(bid)
+                self.state.next_block_id = saved_next_block
+                self.state.turns_since_last_compress = saved_turns
+                self.state.manual_mode = saved_manual_mode
+                self.state.pending_manual_focus = saved_manual_focus
+                if created_this:
+                    self.compression_count -= len(created_this)
+                # Build descriptive error with available context
+                start = item.get("startId", "?") if isinstance(item, dict) else "?"
+                end = item.get("endId", "?") if isinstance(item, dict) else "?"
+                range_results.append({
+                    "range": i + 1, "status": "failed",
+                    "error": f"Failed to compress ({start}-{end}), try compress tool again",
+                })
+                break  # Stop processing further ranges
+
+        # Evict after all ranges complete
         self._evict_inactive_blocks()
+
         mode = "message" if is_message_mode else "range"
+        all_ok = all(r["status"] == "ok" for r in range_results)
+        return {
+            "ok": all_ok,
+            "mode": mode,
+            "created_blocks": all_created,
+            "deactivated_blocks": all_deactivated,
+            "active_blocks": sorted(self.state.active_block_ids),
+            "ranges": range_results,
+            "message": f"Compressed {len(all_created)} {mode}(s) into {', '.join(f'b{i}' for i in all_created)}." if all_created else "No ranges compressed.",
+        }
+
+    _MAX_EXPAND_BYTES = 50_000
+
+    def _handle_expand(
+        self, args: dict[str, Any], messages: list[dict[str, Any]]
+    ) -> dict[str, Any]:
+        """Retrieve original messages from a compressed block."""
+        self._ensure_refs(messages)
+        ref = args.get("blockRef")
+        if not isinstance(ref, str) or not ref.strip():
+            raise ValueError("blockRef must be a non-empty string")
+        ref = ref.strip()
+
+        # Parse block ID from ref (b1 -> 1)
+        if not ref.startswith("b"):
+            raise ValueError(f"Invalid block ref: {ref}. Expected bN format.")
+        try:
+            block_id = int(ref[1:])
+        except ValueError:
+            raise ValueError(f"Invalid block ref: {ref}")
+
+        block = self.state.blocks_by_id.get(block_id)
+        if block is None:
+            raise ValueError(f"Unknown block: {ref}")
+        if not block.active:
+            raise ValueError(
+                f"Block {ref} is no longer active (consumed by a later compression)"
+            )
+
+        # Resolve covered refs to canonical messages
+        formatted = []
+        total_bytes = 0
+        resolved = 0
+        omitted = 0
+        for mref in block.message_refs:
+            idx = self.state.index_by_ref.get(mref)
+            if idx is None or idx >= len(messages):
+                continue
+            resolved += 1
+            msg = messages[idx]
+            role = msg.get("role", "unknown")
+            content = msg.get("content", "")
+            if isinstance(content, (list, dict)):
+                content = json.dumps(content, default=str)
+            if not isinstance(content, str):
+                content = str(content)
+            # Include tool call names and arguments for assistant messages
+            tool_calls = msg.get("tool_calls")
+            if role == "assistant" and tool_calls:
+                tc_parts = []
+                for tc in tool_calls:
+                    if not isinstance(tc, dict):
+                        continue
+                    fn = tc.get("function", {})
+                    if not isinstance(fn, dict):
+                        continue
+                    name = fn.get("name", "?")
+                    args = fn.get("arguments", "")
+                    tc_parts.append(f"{name}({args})")
+                if tc_parts:
+                    tc_str = ", ".join(tc_parts)
+                    content = f"{content} [{tc_str}]" if content.strip() else f"[{tc_str}]"
+            entry = f"[{role}] {content}"
+            entry_bytes = len(entry.encode("utf-8", "ignore"))
+            if total_bytes + entry_bytes > self._MAX_EXPAND_BYTES:
+                remaining = self._MAX_EXPAND_BYTES - total_bytes
+                if remaining > 200:
+                    truncated = entry.encode("utf-8", "ignore")[:remaining].decode("utf-8", "ignore")
+                    formatted.append(truncated + "\n[... message truncated to fit cap]")
+                else:
+                    omitted += 1  # Fix 1: count the skipped message
+                omitted += len(block.message_refs) - resolved
+                break
+            total_bytes += entry_bytes
+            formatted.append(entry)
+
+        if omitted > 0:
+            formatted.append(
+                f"[... output capped at ~{self._MAX_EXPAND_BYTES // 1000}KB. "
+                f"{omitted} more message(s) not shown.]"
+            )
+
+        if not formatted:
+            return {
+                "ok": True,
+                "messages": "",
+                "note": "No messages found for this block.",
+            }
+
         return {
             "ok": True,
-            "mode": mode,
-            "created_blocks": created,
-            "deactivated_blocks": deactivated,
-            "active_blocks": sorted(self.state.active_block_ids),
-            "message": f"Compressed {len(created)} {mode}(s) into {', '.join(f'b{i}' for i in created)}.",
+            "block_ref": ref,
+            "covers": (
+                f"{block.start_ref}-{block.end_ref}"
+                if block.start_ref
+                else ""
+            ),
+            "message_count": len(block.message_refs),
+            "returned": len([f for f in formatted if not f.startswith("[... output")]),
+            "messages": "\n---\n".join(formatted),
         }
 
     # -- Transforms -------------------------------------------------------
@@ -341,6 +704,7 @@ class DCPContextEngine(ContextEngine):
     def _ensure_refs(self, messages: list[dict[str, Any]]) -> None:
         self._sig_cache.clear()
         self.state.index_by_ref.clear()
+        new_refs: list[tuple[str, str]] = []
         for idx, msg in enumerate(messages):
             key = self._message_key(msg, idx)
             ref = self.state.ref_by_message_key.get(key)
@@ -348,6 +712,7 @@ class DCPContextEngine(ContextEngine):
                 ref = self.state.new_message_ref()
                 self.state.ref_by_message_key[key] = ref
                 self.state.message_key_by_ref[ref] = key
+                new_refs.append((key, ref))
             self.state.index_by_ref[ref] = idx
         user_indices = [idx for idx, msg in enumerate(messages) if msg.get("role") == "user"]
         if user_indices:
@@ -356,6 +721,18 @@ class DCPContextEngine(ContextEngine):
                 self.state.turns_since_last_compress += 1
             self.state.last_user_turn_index = last_user
             self.state.messages_since_last_user = len(messages) - last_user - 1
+        # Persist new refs to dcp.db
+        if new_refs and self._ref_db and self.state.session_id:
+            try:
+                self._ref_db.save_refs_batch(self.state.session_id, new_refs)
+                self._ref_db.save_counter(
+                    self.state.session_id,
+                    self.state.next_message_ref,
+                    next_block_id=self.state.next_block_id,
+                    next_run_id=self.state.next_run_id,
+                )
+            except Exception:
+                logger.warning("DCP: failed to persist refs to dcp.db", exc_info=True)
 
     def _match_api_messages_to_refs(
         self,
@@ -415,7 +792,7 @@ class DCPContextEngine(ContextEngine):
             for ref in covered[1:]:
                 idx = ref_to_api_index[ref]
                 msg = self._clone_if_needed(messages, idx, mutated)
-                msg["content"] = f"[DCP: content moved into compressed block {block.ref}.]"
+                msg["content"] = f'[DCP: content moved into compressed block {block.ref}.]'
 
     def _apply_deduplication(self, messages: list[dict[str, Any]], mutated: set[int]) -> None:
         protected = DCP_DEFAULT_PROTECTED_TOOLS | self.config.deduplication.protected_tools
@@ -592,7 +969,8 @@ class DCPContextEngine(ContextEngine):
             f'<dcp-compressed-block id="{block.ref}" topic="{block.topic}">\n'
             f"Summary: {block.summary}\n"
             f"Covers: {covers}\n"
-            "</dcp-compressed-block>"
+            f'[Call expand(blockRef="{block.ref}") to retrieve original messages.]\n'
+            f'</dcp-compressed-block>'
         )
 
     def _tool_name(self, tool_call: Any) -> str | None:
@@ -636,6 +1014,11 @@ class DCPContextEngine(ContextEngine):
         )
         for bid in inactive[_MAX_INACTIVE_BLOCKS:]:
             del self.state.blocks_by_id[bid]
+            if self._ref_db and self.state.session_id:
+                try:
+                    self._ref_db.delete_block(self.state.session_id, bid)
+                except Exception:
+                    logger.warning("DCP: failed to evict block %d from dcp.db", bid, exc_info=True)
 
     def _min_limit(self) -> int:
         return resolve_model_limit(
