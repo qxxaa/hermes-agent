@@ -24,6 +24,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from agent.anthropic_endpoints import (
     _is_deepseek_anthropic_endpoint,
+    _is_github_copilot_anthropic_endpoint,
     _is_kimi_family_endpoint,
     _is_nous_portal_endpoint,
     _is_third_party_anthropic_endpoint,
@@ -884,12 +885,11 @@ def _manage_thinking_signatures(
     replayed assistant tool-call messages.  See hermes-agent#13848 (Kimi) and
     hermes-agent#16748 (DeepSeek).
 
-    Nous Portal's ``/v1/messages`` route is the exception among third-party
-    hosts: it proxies Claude to Anthropic/Vertex/Bedrock and validates the
-    same signed thinking blocks.  Sticky ``session_id`` keeps a conversation
-    on one upstream instance so those signatures stay warm — stripping them
-    here would 400 the first tool-loop turn ("thinking must be passed back").
-    Portal therefore takes the native Anthropic replay path below.
+    Nous Portal and GitHub Copilot's ``/v1/messages`` routes are exceptions
+    among third-party hosts: they proxy Claude's signed thinking contract end
+    to end.  Stripping those blocks loses multi-turn reasoning continuity and
+    violates Anthropic's tool-result replay protocol, so both take the native
+    replay path below.
 
     Mutates ``result`` in place.
     """
@@ -899,6 +899,7 @@ def _manage_thinking_signatures(
     _is_third_party = (
         _is_third_party_anthropic_endpoint(base_url)
         and not _is_nous_portal_endpoint(base_url)
+        and not _is_github_copilot_anthropic_endpoint(base_url)
     )
 
     last_assistant_idx = None
