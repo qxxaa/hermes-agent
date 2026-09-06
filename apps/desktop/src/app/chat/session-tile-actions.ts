@@ -42,6 +42,7 @@ import { setSessionDraftingTool } from '@/store/tool-drafting'
 import type { SessionInfo } from '@/types/hermes'
 
 import type { GatewayRequester } from '../contrib/types'
+import { useBusyInputMode } from '../session/hooks/use-busy-input-mode'
 import { uploadComposerAttachment } from '../session/hooks/use-prompt-actions'
 import {
   appendMidTurnUserMessage,
@@ -57,6 +58,7 @@ import {
   runRewindSubmit,
   type SurvivorUserRowIds
 } from '../session/hooks/use-prompt-actions/rewind'
+import { submitBusyPrompt } from '../session/hooks/use-prompt-actions/steering'
 import { useSubmitPrompt } from '../session/hooks/use-prompt-actions/submit'
 import {
   markSessionRecentlyInterrupted,
@@ -189,6 +191,12 @@ export function useSessionTileActions({ requestGateway, runtimeId, scope, stored
     },
     [requestGateway]
   )
+
+  const getBusyInputMode = useBusyInputMode({
+    sessionId: runtimeId,
+    storedSessionId,
+    requestGateway: requestSessionGateway
+  })
 
   // A ⌘T tab's session is unlisted until its first turn persists — seed the
   // row from the user's first message so the tab and sidebar name it right
@@ -646,6 +654,31 @@ export function useSessionTileActions({ requestGateway, runtimeId, scope, stored
     [update]
   )
 
+  const submitBusyText = useCallback(
+    async (text: string): Promise<boolean> => {
+      const sessionId = runtimeIdRef.current
+      const storedId = storedIdRef.current
+      const delegate = sessionTileDelegate()
+
+      if (!delegate) {
+        return false
+      }
+
+      return submitBusyPrompt({
+        mode: getBusyInputMode(sessionId),
+        text,
+        sessionId,
+        storedSessionId: storedId,
+        foregroundBusy: busyRef.current,
+        request: requestSessionGateway,
+        update: (id, updater) => delegate.updateSession(id, updater),
+        submit: submitPromptText,
+        redirect: steerPrompt
+      })
+    },
+    [busyRef, getBusyInputMode, requestSessionGateway, steerPrompt, submitPromptText]
+  )
+
   return useMemo(
     () => ({
       cancelRun,
@@ -655,6 +688,7 @@ export function useSessionTileActions({ requestGateway, runtimeId, scope, stored
       reloadFromMessage,
       restoreToMessage,
       steerPrompt,
+      submitBusyText,
       submitText
     }),
     [
@@ -665,6 +699,7 @@ export function useSessionTileActions({ requestGateway, runtimeId, scope, stored
       reloadFromMessage,
       restoreToMessage,
       steerPrompt,
+      submitBusyText,
       submitText
     ]
   )

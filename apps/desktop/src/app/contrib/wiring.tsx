@@ -651,6 +651,7 @@ export function ContribWiring({ children }: { children: ReactNode }) {
     reloadFromMessage,
     restoreToMessage,
     steerPrompt,
+    submitBusyText,
     submitText,
     transcribeVoiceAudio
   } = usePromptActions({
@@ -1058,6 +1059,7 @@ export function ContribWiring({ children }: { children: ReactNode }) {
       openSession(sessionId, navigate)
     },
     onRetryResume: sessionId => void resumeSession(sessionId, true),
+    onBusySubmit: submitBusyText,
     onSteer: steerPrompt,
     onSubmit: submitText,
     onThreadMessagesChange: handleThreadMessagesChange,

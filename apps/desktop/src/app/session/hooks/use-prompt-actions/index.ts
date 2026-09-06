@@ -50,6 +50,7 @@ import type {
   ImageAttachResponse,
   SessionRedirectResponse
 } from '../../../types'
+import { useBusyInputMode } from '../use-busy-input-mode'
 
 import {
   appendMidTurnUserMessage,
@@ -66,6 +67,7 @@ import {
   type SurvivorUserRowIds
 } from './rewind'
 import { useSlashCommand } from './slash'
+import { submitBusyPrompt } from './steering'
 import { useSubmitPrompt } from './submit'
 import {
   blobToDataUrl,
@@ -278,6 +280,12 @@ export function usePromptActions({
 }: PromptActionsOptions) {
   const { t } = useI18n()
   const copy = t.desktop
+
+  const getBusyInputMode = useBusyInputMode({
+    sessionId: activeSessionId,
+    storedSessionId: selectedStoredSessionIdRef.current,
+    requestGateway
+  })
 
   const appendSessionTextMessage = useCallback(
     (
@@ -822,6 +830,38 @@ export function usePromptActions({
     [activeSessionIdRef, appendSessionTextMessage, requestGateway, selectedStoredSessionIdRef, updateSessionState]
   )
 
+  const submitBusyText = useCallback(
+    async (text: string): Promise<boolean> => {
+      const sessionId = activeSessionIdRef.current
+
+      if (!sessionId) {
+        return false
+      }
+
+      return submitBusyPrompt({
+        mode: getBusyInputMode(sessionId),
+        text,
+        sessionId,
+        storedSessionId: $sessionStates.get()[sessionId]?.storedSessionId ?? selectedStoredSessionIdRef.current,
+        foregroundBusy: busyRef.current,
+        request: requestGateway,
+        update: updateSessionState,
+        submit: submitPromptText,
+        redirect: redirectPrompt
+      })
+    },
+    [
+      activeSessionIdRef,
+      busyRef,
+      getBusyInputMode,
+      redirectPrompt,
+      requestGateway,
+      selectedStoredSessionIdRef,
+      submitPromptText,
+      updateSessionState
+    ]
+  )
+
   // After a durable rewind the surviving bubbles' cached rowIds are stale (the
   // gateway re-inserted the kept prefix as new SQLite rows). Rebind them to the
   // authoritative post-rewrite ids so the NEXT rewind/edit/regenerate doesn't
@@ -1164,6 +1204,7 @@ export function usePromptActions({
     reloadFromMessage,
     restoreToMessage,
     redirectPrompt,
+    submitBusyText,
     /** @deprecated Use `redirectPrompt` — this is an active-turn redirect, not tool steer. */
     steerPrompt: redirectPrompt,
     submitText,

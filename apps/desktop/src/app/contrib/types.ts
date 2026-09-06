@@ -45,6 +45,7 @@ export type ChatActions = Pick<
   | 'onRemoveAttachment'
   | 'onRestoreToMessage'
   | 'onRetryResume'
+  | 'onBusySubmit'
   | 'onSteer'
   | 'onSubmit'
   | 'onThreadMessagesChange'
