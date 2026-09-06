@@ -18,7 +18,6 @@ import { isMissingRpcMethod } from '@/lib/gateway-rpc'
 import { setSessionYolo } from '@/lib/yolo-session'
 import { openCommandPalettePage } from '@/store/command-palette'
 import { setComposerDraft } from '@/store/composer'
-import { enqueueQueuedPrompt } from '@/store/composer-queue'
 import { applyGoalStatusText } from '@/store/goals'
 import { dismissNotification, notify, notifyError } from '@/store/notifications'
 import { setPetScale } from '@/store/pet-gallery'
@@ -34,7 +33,6 @@ import {
   $connection,
   $sessions,
   $yoloActive,
-  resolveComposerSessionKey,
   setActiveSessionId,
   setCurrentUsage,
   setModelPickerOpen,
@@ -61,11 +59,12 @@ import type {
   SlashExecResponse
 } from '../../../types'
 
+import { queueKickoffIfSessionBusy } from './queue-if-busy'
 import { resolveTargetSessionId } from './resolve-target-session'
+import { dispatchSteering, sendSteeringFallback } from './steering'
 import {
   type GatewayRequest,
   isSessionIdCandidate,
-  isTargetSessionBusy,
   renderCommandsCatalog,
   renderRpcResult,
   slashStatusText,
@@ -269,6 +268,34 @@ export function useSlashCommand(deps: SlashCommandDeps) {
           return
         }
 
+        if (name === 'steer') {
+          try {
+            const accepted = await dispatchSteering({
+              request: requestGateway,
+              sessionId,
+              text: arg,
+              render: renderSlashOutput,
+              send: text =>
+                sendSteeringFallback({
+                  text,
+                  sessionId,
+                  storedSessionId,
+                  foregroundBusy: busyRef.current,
+                  render: renderSlashOutput,
+                  submit: submitPromptText
+                })
+            })
+
+            if (!accepted) {
+              renderSlashOutput('error: steering was not accepted')
+            }
+          } catch {
+            renderSlashOutput('error: steering delivery could not be confirmed; not retried')
+          }
+
+          return
+        }
+
         let slashExecError: unknown = null
 
         const handleDispatch = async (
@@ -345,25 +372,25 @@ export function useSlashCommand(deps: SlashCommandDeps) {
           // view's — see isTargetSessionBusy. `busyRef` mirrors whatever chat
           // is on screen, while this command runs against the session
           // resolveTargetSessionId picked, routinely a different one.
-          if (isTargetSessionBusy($sessionStates.get(), sessionId, busyRef.current)) {
-            // The backend already executed the command — for `/goal <text>`
-            // the goal is set and `message` is its kickoff prompt. Dropping
-            // it here loses the kickoff silently (the goal exists but the
-            // agent never hears about it, #63352). Queue it on the composer
-            // queue instead: it fires when the running turn settles, and the
-            // queue panel above the composer shows it in the meantime.
-            //
-            // Park it on the same stored session the output writer is bound to
-            // rather than re-reading the globals here — a session switch between
-            // dispatch and this branch would otherwise queue the kickoff on
-            // whichever chat is now in front.
-            const queueKey = resolveComposerSessionKey(storedSessionId, $sessions.get()) || storedSessionId || sessionId
+          //
+          // Parked on the same stored session the output writer is bound to
+          // rather than re-reading the globals — a session switch between
+          // dispatch and this branch would otherwise queue the kickoff on
+          // whichever chat is now in front (#63352).
+          const queued = queueKickoffIfSessionBusy({
+            displayText,
+            foregroundBusy: busyRef.current,
+            sessionId,
+            storedSessionId,
+            text: message
+          })
 
-            if (enqueueQueuedPrompt(queueKey, { attachments: [], text: message, displayText })) {
-              renderSlashOutput('session busy — message queued to send when the current turn finishes')
-            } else {
-              renderSlashOutput('session busy — /interrupt the current turn before sending this command')
-            }
+          if (queued !== 'idle') {
+            renderSlashOutput(
+              queued === 'queued'
+                ? 'session busy — message queued to send when the current turn finishes'
+                : 'session busy — /interrupt the current turn before sending this command'
+            )
 
             return
           }

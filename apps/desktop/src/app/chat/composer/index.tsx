@@ -107,6 +107,7 @@ export function ChatBar({
   onPickFolders,
   onPickImages,
   onRemoveAttachment,
+  onBusySubmit,
   onSteer,
   onSubmit: onSubmitProp,
   onTranscribeAudio
@@ -376,6 +377,7 @@ export function ChatBar({
     focusInput,
     inputDisabled,
     loadIntoComposer,
+    onBusySubmit,
     // The submit engine's only cancel call is the Stop-button branch (busy +
     // empty composer) — an explicit halt, so it parks the queue.
     onCancel: haltRun,
@@ -1195,6 +1197,7 @@ export function ChatBar({
               grows upward over the thread and the dock's own measurement covers
               it. Collapses to nothing when every status is empty. */}
           <ComposerStatusStack
+            onSubmit={onSubmit}
             queue={
               activeQueueSessionKey && queuedPrompts.length > 0 ? (
                 <QueuePanel

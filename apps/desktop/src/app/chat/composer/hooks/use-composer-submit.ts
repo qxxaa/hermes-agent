@@ -32,6 +32,7 @@ interface UseComposerSubmitArgs {
   focusInput: () => void
   inputDisabled: boolean
   loadIntoComposer: (text: string, attachments: ComposerAttachment[]) => void
+  onBusySubmit?: ChatBarProps['onBusySubmit']
   onCancel: ChatBarProps['onCancel']
   onSteer: ChatBarProps['onSteer']
   onSubmit: ChatBarProps['onSubmit']
@@ -67,6 +68,7 @@ export function useComposerSubmit({
   focusInput,
   inputDisabled,
   loadIntoComposer,
+  onBusySubmit,
   onCancel,
   onSteer,
   onSubmit,
@@ -203,10 +205,39 @@ export function useComposerSubmit({
         clearDraft()
         dispatchSubmit(text)
       } else if (!compacting && !blockingPrompt && !attachments.length && text.trim()) {
-        // Cursor-style stop-and-correct: interrupt the live turn and redirect
-        // it with this text. redirect() preserves the shown reasoning/work; if
-        // the turn already ended, steerDraft re-queues so nothing is lost.
-        steerDraft()
+        // Ordinary Send follows loaded backend policy. Explicit correction
+        // controls retain steerDraft's existing redirect semantics.
+        if (onBusySubmit) {
+          const submittedScope = activeQueueSessionKeyRef.current
+          triggerHaptic('submit')
+          clearDraft()
+
+          const restore = () => {
+            if (activeQueueSessionKeyRef.current === submittedScope) {
+              const retained = [text, draftRef.current].filter(Boolean).join('\n\n')
+              setComposerText(retained)
+              draftRef.current = retained
+
+              if (editorRef.current) {
+                editorRef.current.textContent = retained
+              }
+
+              stashAt(submittedScope, retained)
+            } else {
+              stashAt(submittedScope, text)
+            }
+          }
+
+          void Promise.resolve(onBusySubmit(text))
+            .then(accepted => {
+              if (!accepted) {
+                restore()
+              }
+            })
+            .catch(restore)
+        } else {
+          steerDraft()
+        }
       } else if (payloadPresent) {
         // Attachments can't ride a redirect (no tool-result image carriage) —
         // queue the whole payload for the next turn. Same for a turn parked on
