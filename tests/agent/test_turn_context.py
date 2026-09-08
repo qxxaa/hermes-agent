@@ -374,6 +374,57 @@ def test_pending_cli_message_uses_clean_override_for_api_local_note():
 
 
 
+def test_non_gateway_timestamps_decorate_model_context_but_persist_clean_text():
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+
+    tz = ZoneInfo("Europe/Berlin")
+    timestamp = datetime(2026, 4, 28, 13, 42, 10, tzinfo=tz).timestamp()
+    agent = _FakeAgent()
+    history = [{"role": "user", "content": "earlier", "timestamp": timestamp}]
+
+    with (
+        patch(
+            "hermes_cli.config.load_config_readonly",
+            return_value={"message_timestamps": {"enabled": True}},
+        ),
+        patch("hermes_time.get_timezone", return_value=tz),
+    ):
+        ctx = _build(
+            agent,
+            user_message="now",
+            conversation_history=history,
+            persist_user_timestamp=timestamp,
+        )
+
+    assert history[0]["content"] == "earlier"
+    assert ctx.messages[0]["content"] == "[Tue 2026-04-28 13:42:10 CEST] earlier"
+    assert ctx.messages[-1]["content"] == "[Tue 2026-04-28 13:42:10 CEST] now"
+    assert ctx.original_user_message == "now"
+    assert agent._persist_user_message_override == "now"
+    assert agent._persist_user_message_timestamp == timestamp
+
+
+def test_gateway_prepared_turn_is_not_enabled_by_global_setting():
+    agent = _FakeAgent()
+    agent._message_timestamps_prepared_by_gateway = True
+    timestamp = 1_777_376_930.0
+
+    with patch(
+        "hermes_cli.config.load_config_readonly",
+        return_value={"message_timestamps": {"enabled": True}},
+    ):
+        ctx = _build(
+            agent,
+            user_message="gateway-disabled message",
+            conversation_history=[],
+            persist_user_timestamp=timestamp,
+        )
+
+    assert ctx.messages[-1]["content"] == "gateway-disabled message"
+    assert agent._persist_user_message_timestamp == timestamp
+
+
 def test_recall_indicator_emitted_when_memory_injected():
     """When prefetch injects memory, the deterministic indicator is emitted."""
     agent = _FakeAgent()
