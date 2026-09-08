@@ -398,8 +398,11 @@ def test_non_gateway_timestamps_decorate_model_context_but_persist_clean_text():
         )
 
     assert history[0]["content"] == "earlier"
-    assert ctx.messages[0]["content"] == "[Tue 2026-04-28 13:42:10 CEST] earlier"
-    assert ctx.messages[-1]["content"] == "[Tue 2026-04-28 13:42:10 CEST] now"
+    # Timestamp rendering is a request-only replay projection. The loop's
+    # canonical return/persistence list remains the caller's clean history.
+    assert ctx.messages[0]["content"] == "earlier"
+    assert ctx.messages[-1]["content"] == "now"
+    assert ctx.message_timestamp_replay_enabled is True
     assert ctx.original_user_message == "now"
     assert agent._persist_user_message_override == "now"
     assert agent._persist_user_message_timestamp == timestamp
