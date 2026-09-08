@@ -78,6 +78,57 @@ def test_direct_agent_global_timestamp_reaches_responses_request(tmp_path, monke
         db.close()
 
 
+def test_direct_agent_keeps_fresh_recovery_shaped_input_at_provider_boundary(tmp_path, monkeypatch):
+    """Recovery cleanup is historical replay only, never fresh user intake."""
+    from hermes_state import SessionDB
+    from openai.types.responses import Response
+    from run_agent import AIAgent
+
+    captured = []
+    db = SessionDB(db_path=tmp_path / "state.db")
+
+    def respond(kwargs, **unused):
+        captured.append(deepcopy(kwargs))
+        return Response.model_validate({
+            "id": "resp_fresh", "object": "response", "created_at": STAMP,
+            "model": "test-model", "status": "completed",
+            "output": [{
+                "type": "message", "id": "msg_fresh", "role": "assistant",
+                "status": "completed", "phase": "final_answer",
+                "content": [{"type": "output_text", "text": "done", "annotations": []}],
+            }],
+            "usage": None, "error": None, "incomplete_details": None,
+            "instructions": None, "metadata": {}, "parallel_tool_calls": True,
+            "temperature": None, "tool_choice": "auto", "tools": [], "top_p": None,
+        })
+
+    fresh = "[System note: Your previous turn was interrupted. Continue.] actual question"
+    try:
+        agent = AIAgent(
+            api_key="test-key", base_url="http://127.0.0.1:1/v1", provider="openai-compat",
+            model="test-model", api_mode="codex_responses", max_iterations=1,
+            enabled_toolsets=[], quiet_mode=True, skip_context_files=True,
+            skip_memory=True, save_trajectories=False, session_db=db, session_id="timestamp-fresh",
+        )
+        agent._cached_system_prompt = "Stable synthetic system prompt."
+        monkeypatch.setattr("hermes_cli.config.load_config_readonly", lambda: {
+            "message_timestamps": {"enabled": True},
+        })
+        monkeypatch.setattr("hermes_time.get_timezone", lambda: ZoneInfo("UTC"))
+        monkeypatch.setattr(agent, "_interruptible_streaming_api_call", respond)
+        monkeypatch.setattr(agent, "_interruptible_api_call", respond)
+
+        result = agent.run_conversation(fresh, task_id="timestamp-fresh", persist_user_timestamp=STAMP)
+
+        assert result["completed"] is True
+        assert captured[0]["input"][-1]["content"] == (
+            "[Thu 2026-08-20 12:00:00 UTC] " + fresh
+        )
+        assert result["messages"][-2]["content"] == fresh
+    finally:
+        db.close()
+
+
 def test_direct_agent_timestamp_projection_survives_tool_continuation_and_db_reopen(tmp_path, monkeypatch):
     """Only the provider boundary is replaced; cached and durable histories stay canonical."""
     from hermes_state import SessionDB

@@ -151,19 +151,23 @@ def render_message_timestamp_replay(
         message = dict(source_message)
         content = message.get("content")
         if message.get("role") == "user" and isinstance(content, str) and content:
-            body, embedded_timestamp = strip_leading_message_timestamps(content, tz=tz)
-            cleaned = _strip_auto_continue_noise(body)
             replay_timestamp = message.get("timestamp")
-            if cleaned != body:
-                if not cleaned:
-                    if source_idx < current_turn_user_idx:
-                        rendered_current_idx -= 1
-                    continue
-                content = cleaned
-                message["content"] = content
-                message.pop("api_content", None)
-                if embedded_timestamp is not None:
-                    replay_timestamp = embedded_timestamp
+            # Gateway recovery cleanup applies to replayed history. The fresh
+            # turn can legitimately contain the same text and must reach the
+            # provider unchanged apart from normal timestamp rendering.
+            if source_idx != current_turn_user_idx:
+                body, embedded_timestamp = strip_leading_message_timestamps(content, tz=tz)
+                cleaned = _strip_auto_continue_noise(body)
+                if cleaned != body:
+                    if not cleaned:
+                        if source_idx < current_turn_user_idx:
+                            rendered_current_idx -= 1
+                        continue
+                    content = cleaned
+                    message["content"] = content
+                    message.pop("api_content", None)
+                    if embedded_timestamp is not None:
+                        replay_timestamp = embedded_timestamp
             if enabled:
                 rendered = render_user_content_with_timestamp(content, replay_timestamp, tz=tz)
                 sidecar = message.get("api_content")
