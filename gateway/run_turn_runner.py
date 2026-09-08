@@ -1504,8 +1504,6 @@ class TurnRunner:
         session_key = ctx.session_key or ""
         token = set_current_session_key(session_key)
         register_gateway_notify(session_key, self._approval_notify_sync)
-        _prior_timestamp_prepared = getattr(agent, "_message_timestamps_prepared_by_gateway", None)
-        agent._message_timestamps_prepared_by_gateway = True
         try:
             api_message = _wrap_current_message_with_observed_context(self._native_image_run_message(), observed_group_context)
             kwargs = {"conversation_history": agent_history, "task_id": ctx.session_id}
@@ -1527,12 +1525,10 @@ class TurnRunner:
             # turn so a restart-interrupted turn is recorded WITH its id for drain-window dedup.
             if ctx.inbound_message_id is not None:
                 kwargs["persist_user_platform_id"] = str(ctx.inbound_message_id)
-            return agent.run_conversation(api_message, **kwargs)
+            return agent.run_conversation(
+                api_message, message_timestamp_handling="gateway_prepared", **kwargs
+            )
         finally:
-            if _prior_timestamp_prepared is None:
-                delattr(agent, "_message_timestamps_prepared_by_gateway")
-            else:
-                agent._message_timestamps_prepared_by_gateway = _prior_timestamp_prepared
             unregister_gateway_notify(session_key)
             # Cancel pending clarify entries so blocked agent threads don't hang past the end of the
             # run (interrupt, completion, gateway shutdown). Idempotent.

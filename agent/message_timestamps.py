@@ -141,18 +141,13 @@ def _strip_auto_continue_noise(content: str) -> str:
     return text
 
 
-def render_turn_with_message_timestamps(
-    history: Optional[List[Dict[str, Any]]], user_message: Any, *, config: Optional[dict],
-    current_timestamp: Any = None, tz=None,
-) -> Tuple[List[Dict[str, Any]], Any, Optional[float]]:
-    """Prepare a non-gateway turn without mutating caller data.
-
-    Recovery cleanup follows the gateway regardless of rendering state; only
-    the timestamp prefix is governed by the non-gateway configuration.
-    """
-    enabled = message_timestamps_enabled(config)
-    rendered_history: List[Dict[str, Any]] = []
-    for source_message in history or []:
+def render_message_timestamp_replay(
+    messages: List[Dict[str, Any]], *, enabled: bool, current_turn_user_idx: int, tz=None,
+) -> Tuple[List[Dict[str, Any]], int]:
+    """Build the gateway-compatible model replay without changing retained rows."""
+    rendered_messages: List[Dict[str, Any]] = []
+    rendered_current_idx = current_turn_user_idx
+    for source_idx, source_message in enumerate(messages):
         message = dict(source_message)
         content = message.get("content")
         if message.get("role") == "user" and isinstance(content, str) and content:
@@ -161,6 +156,8 @@ def render_turn_with_message_timestamps(
             replay_timestamp = message.get("timestamp")
             if cleaned != body:
                 if not cleaned:
+                    if source_idx < current_turn_user_idx:
+                        rendered_current_idx -= 1
                     continue
                 content = cleaned
                 message["content"] = content
@@ -175,7 +172,23 @@ def render_turn_with_message_timestamps(
                 ):
                     message.pop("api_content", None)
                 message["content"] = rendered
-        rendered_history.append(message)
+        rendered_messages.append(message)
+    return rendered_messages, rendered_current_idx
+
+
+def render_turn_with_message_timestamps(
+    history: Optional[List[Dict[str, Any]]], user_message: Any, *, config: Optional[dict],
+    current_timestamp: Any = None, tz=None,
+) -> Tuple[List[Dict[str, Any]], Any, Optional[float]]:
+    """Prepare a non-gateway turn without mutating caller data.
+
+    Recovery cleanup follows the gateway regardless of rendering state; only
+    the timestamp prefix is governed by the non-gateway configuration.
+    """
+    enabled = message_timestamps_enabled(config)
+    rendered_history, _ = render_message_timestamp_replay(
+        history or [], enabled=enabled, current_turn_user_idx=len(history or []), tz=tz
+    )
 
     if not enabled:
         return rendered_history, user_message, None
