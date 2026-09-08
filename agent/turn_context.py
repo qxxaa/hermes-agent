@@ -886,7 +886,7 @@ def build_turn_context(
         _msg_preview.replace("\n", " "),
     )
 
-    persistence_history = conversation_history
+    prepared_history = conversation_history
     # Copy so the caller's list is never mutated.
     messages = list(conversation_history) if conversation_history else []
     if message_timestamp_handling == "agent":
@@ -898,9 +898,9 @@ def build_turn_context(
                 current_turn_user_idx=len(messages), tz=message_timestamp_timezone,
             )
             # The rendered copies are working history, not new transcript rows.
-            # Give the existing identity-based persistence boundary the prepared
-            # historical objects without including this turn's newly appended user.
-            persistence_history = list(messages)
+            # Give turn preparation the prepared historical objects without
+            # including this turn's newly appended user.
+            prepared_history = list(messages)
         except Exception:
             logger.debug("message timestamp history preparation skipped", exc_info=True)
     user_msg, pending_cli_message = _stage_turn_user_message(
@@ -949,7 +949,7 @@ def build_turn_context(
 
     compaction = run_turn_start_compaction(
         agent, messages=messages, system_message=system_message,
-        active_system_prompt=active_system_prompt, conversation_history=conversation_history,
+        active_system_prompt=active_system_prompt, conversation_history=prepared_history,
         current_turn_user_idx=current_turn_user_idx, user_message=user_message,
         effective_task_id=effective_task_id,
     )
@@ -982,7 +982,7 @@ def build_turn_context(
             plugin_user_context, preflight_compressed=compaction.compressed,
         )
 
-    _persist_turn_start(agent, messages, persistence_history, pending_cli_message)
+    _persist_turn_start(agent, messages, conversation_history, pending_cli_message)
 
     # Title the session now: the row exists and titling depends only on the user's ask,
     # so it runs concurrently with the turn. Daemon thread, no-op once titled.

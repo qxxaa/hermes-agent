@@ -408,6 +408,99 @@ def test_non_gateway_timestamps_prepare_working_context_but_persist_clean_text()
 
 
 @pytest.mark.parametrize(
+    ("message_timestamp_handling", "use_rotation_baseline"),
+    [
+        ("agent", False),
+        ("gateway_prepared", True),
+        ("disabled", False),
+    ],
+)
+def test_turn_start_persistence_uses_the_authoritative_compaction_baseline(
+    monkeypatch, message_timestamp_handling, use_rotation_baseline,
+):
+    """The compaction result, not the pre-compaction input, defines the flush boundary."""
+    from agent.turn_context_compaction import CompactionOutcome
+
+    agent = _FakeAgent()
+    history = [{"role": "assistant", "content": "before compaction"}]
+    replacement_history = [{"role": "assistant", "content": "compacted baseline"}]
+    expected_history = None if use_rotation_baseline else replacement_history
+    persisted = []
+
+    def _compaction(_agent, **kwargs):
+        return CompactionOutcome(
+            messages=kwargs["messages"],
+            active_system_prompt=kwargs["active_system_prompt"],
+            conversation_history=expected_history,
+            current_turn_user_idx=kwargs["current_turn_user_idx"],
+        )
+
+    monkeypatch.setattr("agent.turn_context_compaction.run_turn_start_compaction", _compaction)
+    monkeypatch.setattr(agent, "_persist_session", lambda messages, baseline: persisted.append(baseline))
+    if message_timestamp_handling == "agent":
+        monkeypatch.setattr(
+            "hermes_cli.config.load_config_readonly",
+            lambda: {"message_timestamps": {"enabled": False}},
+        )
+
+    ctx = _build(
+        agent,
+        conversation_history=history,
+        message_timestamp_handling=message_timestamp_handling,
+    )
+
+    assert ctx.conversation_history is expected_history
+    assert persisted == [expected_history]
+
+
+def test_agent_timestamp_preparation_becomes_the_noop_compaction_baseline(monkeypatch):
+    """Prepared historical copies are durable history while the new user remains pending."""
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+
+    from agent.turn_context_compaction import CompactionOutcome
+
+    timestamp = datetime(2026, 4, 28, 13, 42, 10, tzinfo=ZoneInfo("UTC")).timestamp()
+    agent = _FakeAgent()
+    history = [{"role": "user", "content": "earlier", "timestamp": timestamp}]
+    observed = {}
+    persisted = []
+
+    def _noop_compaction(_agent, **kwargs):
+        observed["baseline"] = kwargs["conversation_history"]
+        return CompactionOutcome(
+            messages=kwargs["messages"],
+            active_system_prompt=kwargs["active_system_prompt"],
+            conversation_history=kwargs["conversation_history"],
+            current_turn_user_idx=kwargs["current_turn_user_idx"],
+        )
+
+    monkeypatch.setattr("agent.turn_context_compaction.run_turn_start_compaction", _noop_compaction)
+    monkeypatch.setattr(agent, "_persist_session", lambda messages, baseline: persisted.append(baseline))
+    monkeypatch.setattr(
+        "hermes_cli.config.load_config_readonly",
+        lambda: {"message_timestamps": {"enabled": True}},
+    )
+    monkeypatch.setattr("hermes_time.get_timezone", lambda: ZoneInfo("UTC"))
+
+    ctx = _build(
+        agent,
+        user_message="now",
+        conversation_history=history,
+        persist_user_timestamp=timestamp,
+    )
+
+    prepared_history = observed["baseline"]
+    assert prepared_history is not history
+    assert prepared_history[0] is not history[0]
+    assert prepared_history[0]["content"] == "[Tue 2026-04-28 13:42:10 UTC] earlier"
+    assert ctx.conversation_history is prepared_history
+    assert persisted == [prepared_history]
+    assert ctx.messages[-1]["content"] == "[Tue 2026-04-28 13:42:10 UTC] now"
+    assert ctx.messages[-1] not in prepared_history
+
+
+@pytest.mark.parametrize(
     "global_enabled,gateway_enabled",
     [(True, False), (False, True)],
 )

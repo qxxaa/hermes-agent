@@ -143,10 +143,14 @@ def test_true_engine_noop_does_not_defeat_retry_loop_blocking():
     hook.assert_called_once()
     agent._compress_context.assert_called_once()
     assert ctx.preflight_compression_blocked is False
-    # No real compaction -> the caller-provided history object remains the
-    # flush baseline (no re-baseline through
+    # No real compaction preserves the prepared non-gateway working-history
+    # baseline; it does not re-baseline through
     # conversation_history_after_compression).
-    assert ctx.conversation_history is history
+    assert ctx.conversation_history is not None
+    assert ctx.conversation_history is not history
+    assert [message["content"] for message in ctx.conversation_history] == [
+        message["content"] for message in history
+    ]
 
 
 
