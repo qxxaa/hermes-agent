@@ -8,7 +8,6 @@ agent intake boundary without changing persisted user text.
 from __future__ import annotations
 
 import re
-import time
 from datetime import datetime
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -178,27 +177,3 @@ def render_message_timestamp_replay(
                 message["content"] = rendered
         rendered_messages.append(message)
     return rendered_messages, rendered_current_idx
-
-
-def render_turn_with_message_timestamps(
-    history: Optional[List[Dict[str, Any]]], user_message: Any, *, config: Optional[dict],
-    current_timestamp: Any = None, tz=None,
-) -> Tuple[List[Dict[str, Any]], Any, Optional[float]]:
-    """Prepare a non-gateway turn without mutating caller data.
-
-    Recovery cleanup follows the gateway regardless of rendering state; only
-    the timestamp prefix is governed by the non-gateway configuration.
-    """
-    enabled = message_timestamps_enabled(config)
-    rendered_history, _ = render_message_timestamp_replay(
-        history or [], enabled=enabled, current_turn_user_idx=len(history or []), tz=tz
-    )
-
-    if not enabled:
-        return rendered_history, user_message, None
-    effective_timestamp = coerce_message_timestamp(
-        time.time() if current_timestamp is None else current_timestamp, tz=tz
-    )
-    if isinstance(user_message, str) and user_message:
-        user_message = render_user_content_with_timestamp(user_message, effective_timestamp, tz=tz)
-    return rendered_history, user_message, effective_timestamp

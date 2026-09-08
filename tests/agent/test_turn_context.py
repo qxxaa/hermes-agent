@@ -408,23 +408,31 @@ def test_non_gateway_timestamps_decorate_model_context_but_persist_clean_text():
     assert agent._persist_user_message_timestamp == timestamp
 
 
-def test_gateway_prepared_turn_is_not_enabled_by_global_setting():
+@pytest.mark.parametrize(
+    "global_enabled,gateway_enabled",
+    [(True, False), (False, True)],
+)
+def test_gateway_prepared_turn_defers_to_gateway_configuration(global_enabled, gateway_enabled):
     agent = _FakeAgent()
-    agent._message_timestamps_prepared_by_gateway = True
     timestamp = 1_777_376_930.0
 
     with patch(
         "hermes_cli.config.load_config_readonly",
-        return_value={"message_timestamps": {"enabled": True}},
+        return_value={
+            "message_timestamps": {"enabled": global_enabled},
+            "gateway": {"message_timestamps": {"enabled": gateway_enabled}},
+        },
     ):
         ctx = _build(
             agent,
             user_message="gateway-disabled message",
             conversation_history=[],
             persist_user_timestamp=timestamp,
+            message_timestamp_handling="gateway_prepared",
         )
 
     assert ctx.messages[-1]["content"] == "gateway-disabled message"
+    assert ctx.message_timestamp_replay_enabled is None
     assert agent._persist_user_message_timestamp == timestamp
 
 
