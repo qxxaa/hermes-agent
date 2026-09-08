@@ -167,3 +167,306 @@ def test_direct_agent_timestamp_projection_survives_tool_continuation_and_db_reo
         assert resumed["messages"][0]["content"] == "first question"
     finally:
         db.close()
+
+
+def test_timestamped_history_survives_actual_tool_pruning_persistence_and_restart(tmp_path, monkeypatch):
+    """A real prune commit must retain canonical timestamp rows and compatible sidecars."""
+    from agent.context_compressor import _estimate_msg_budget_tokens
+    from hermes_state import SessionDB
+    from openai.types.responses import Response
+    from run_agent import AIAgent
+
+    db_path = tmp_path / "state.db"
+    session_id = "timestamp-prune-restart"
+    timestamped_sidecar = "[Thu 2026-08-20 12:00:30 UTC] retained question\n\nremember this context"
+    db = SessionDB(db_path=db_path)
+    captured = []
+
+    history = [
+        {"role": "user", "content": "first question", "timestamp": STAMP},
+        {
+            "role": "assistant", "content": "", "tool_calls": [{
+                "id": "call_1", "type": "function",
+                "function": {"name": "read_file", "arguments": '{"path":"/tmp/synthetic"}'},
+            }],
+        },
+        {"role": "tool", "tool_call_id": "call_1", "content": "x" * 24_000},
+        {"role": "assistant", "content": "large result received"},
+        {
+            "role": "user", "content": "retained question", "timestamp": STAMP + 30,
+            "api_content": timestamped_sidecar,
+        },
+        {"role": "assistant", "content": "retained answer"},
+        {"role": "user", "content": "tail question", "timestamp": STAMP + 60},
+        {"role": "assistant", "content": "tail answer"},
+    ]
+
+    def response(kwargs, **unused):
+        captured.append(deepcopy(kwargs))
+        return Response.model_validate({
+            "id": "resp_prune", "object": "response", "created_at": STAMP,
+            "model": "test-model", "status": "completed",
+            "output": [{
+                "type": "message", "id": "msg_prune", "role": "assistant",
+                "status": "completed", "phase": "final_answer",
+                "content": [{"type": "output_text", "text": "resumed", "annotations": []}],
+            }],
+            "usage": None, "error": None, "incomplete_details": None,
+            "instructions": None, "metadata": {}, "parallel_tool_calls": True,
+            "temperature": None, "tool_choice": "auto", "tools": [], "top_p": None,
+        })
+
+    def agent_for(database):
+        agent = AIAgent(
+            api_key="test-key", base_url="http://127.0.0.1:1/v1", provider="openai-compat",
+            model="test-model", api_mode="codex_responses", max_iterations=1,
+            enabled_toolsets=[], quiet_mode=True, skip_context_files=True, skip_memory=True,
+            save_trajectories=False, session_db=database, session_id=session_id,
+        )
+        agent._cached_system_prompt = "Stable synthetic system prompt."
+        agent.context_compressor.proactive_prune_tokens = 48_000
+        agent.context_compressor.proactive_prune_min_result_chars = 8_000
+        agent.context_compressor.proactive_prune_min_reclaim_tokens = 4_096
+        agent.context_compressor.protect_first_n = 0
+        agent.context_compressor.protect_last_n = 2
+        monkeypatch.setattr(agent, "_interruptible_streaming_api_call", response)
+        monkeypatch.setattr(agent, "_interruptible_api_call", response)
+        return agent
+
+    monkeypatch.setattr("hermes_cli.config.load_config_readonly", lambda: {
+        "message_timestamps": {"enabled": True},
+    })
+    monkeypatch.setattr("hermes_time.get_timezone", lambda: ZoneInfo("UTC"))
+    try:
+        db.create_session(session_id, source="cli")
+        db.append_messages_batch(session_id, history)
+        first_agent = agent_for(db)
+        before = db.get_messages_as_conversation(session_id)
+        pruned, prune_count = first_agent.context_compressor.prune_tool_results_only(
+            before, current_tokens=120_000,
+        )
+
+        assert prune_count >= 1
+        assert len(pruned[2]["content"]) < len(history[2]["content"])
+        assert sum(_estimate_msg_budget_tokens(message) for message in pruned) < sum(
+            _estimate_msg_budget_tokens(message) for message in before
+        )
+    finally:
+        db.close()
+
+    reopened = SessionDB(db_path=db_path)
+    try:
+        durable = reopened.get_messages_as_conversation(session_id)
+        retained = next(message for message in durable if message.get("content") == "retained question")
+        assert retained["timestamp"] == STAMP + 30
+        assert retained["api_content"] == timestamped_sidecar
+        resumed_agent = agent_for(reopened)
+        resumed = resumed_agent.run_conversation(
+            "resume question", conversation_history=durable, task_id="prune-restart",
+            persist_user_timestamp=STAMP + 90,
+        )
+        assert resumed["completed"] is True
+        assert any(message.get("content") == timestamped_sidecar for message in captured[0]["input"])
+        retained_returned = next(message for message in resumed["messages"] if message.get("content") == "retained question")
+        assert retained_returned["timestamp"] == STAMP + 30
+        assert retained_returned["api_content"] == timestamped_sidecar
+    finally:
+        reopened.close()
+
+
+def test_timestamped_retained_tail_survives_full_compaction_persistence_and_restart(tmp_path, monkeypatch):
+    """Full production compaction may summarize history but not timestamped retained rows."""
+    from agent.context_compressor import COMPRESSED_SUMMARY_METADATA_KEY, SUMMARY_PREFIX
+    from agent.conversation_compression import compress_context
+    from hermes_state import SessionDB
+    from openai.types.responses import Response
+    from run_agent import AIAgent
+
+    db_path = tmp_path / "state.db"
+    session_id = "timestamp-compaction-restart"
+    retained_sidecar = "[Thu 2026-08-20 12:00:30 UTC] retained tail question\n\nretained context"
+    db = SessionDB(db_path=db_path)
+    captured = []
+    history = []
+    for index in range(4):
+        history.extend([
+            {
+                "role": "user", "content": f"old question {index} " + "x" * 4_000,
+                "timestamp": STAMP + index,
+            },
+            {"role": "assistant", "content": f"old answer {index} " + "y" * 4_000},
+        ])
+    history.extend([
+        {
+            "role": "user", "content": "retained tail question", "timestamp": STAMP + 30,
+            "api_content": retained_sidecar,
+        },
+        {"role": "assistant", "content": "retained tail answer"},
+    ])
+
+    def response(kwargs, **unused):
+        captured.append(deepcopy(kwargs))
+        return Response.model_validate({
+            "id": "resp_compaction", "object": "response", "created_at": STAMP,
+            "model": "test-model", "status": "completed",
+            "output": [{
+                "type": "message", "id": "msg_compaction", "role": "assistant",
+                "status": "completed", "phase": "final_answer",
+                "content": [{"type": "output_text", "text": "continued", "annotations": []}],
+            }],
+            "usage": None, "error": None, "incomplete_details": None,
+            "instructions": None, "metadata": {}, "parallel_tool_calls": True,
+            "temperature": None, "tool_choice": "auto", "tools": [], "top_p": None,
+        })
+
+    def agent_for(database):
+        agent = AIAgent(
+            api_key="test-key", base_url="http://127.0.0.1:1/v1", provider="openai-compat",
+            model="test-model", api_mode="codex_responses", max_iterations=1,
+            enabled_toolsets=[], quiet_mode=True, skip_context_files=True, skip_memory=True,
+            save_trajectories=False, session_db=database, session_id=session_id,
+        )
+        agent._cached_system_prompt = "Stable synthetic system prompt."
+        agent._compression_feasibility_checked = True
+        agent.compression_in_place = True
+        agent.context_compressor.protect_first_n = 0
+        agent.context_compressor.protect_last_n = 2
+        agent.context_compressor.tail_token_budget = 80
+        monkeypatch.setattr(agent, "_interruptible_streaming_api_call", response)
+        monkeypatch.setattr(agent, "_interruptible_api_call", response)
+        return agent
+
+    monkeypatch.setattr("hermes_cli.config.load_config_readonly", lambda: {
+        "message_timestamps": {"enabled": True},
+    })
+    monkeypatch.setattr("hermes_time.get_timezone", lambda: ZoneInfo("UTC"))
+    try:
+        db.create_session(session_id, source="cli")
+        db.append_messages_batch(session_id, history)
+        first_agent = agent_for(db)
+        with pytest.MonkeyPatch.context() as summary_patch:
+            summary_patch.setattr(
+                first_agent.context_compressor,
+                "_generate_summary",
+                lambda *args, **kwargs: f"{SUMMARY_PREFIX}\nSynthetic compacted history",
+            )
+            compacted, _ = compress_context(
+                first_agent, db.get_messages_as_conversation(session_id),
+                "Stable synthetic system prompt.", approx_tokens=100_000, force=True,
+            )
+
+        assert len(compacted) < len(history)
+        assert any(message.get(COMPRESSED_SUMMARY_METADATA_KEY) for message in compacted)
+        retained_compacted = next(
+            message for message in compacted if message.get("content") == "retained tail question"
+        )
+        assert retained_compacted["timestamp"] == STAMP + 30
+        assert retained_compacted["api_content"] == retained_sidecar
+    finally:
+        db.close()
+
+    reopened = SessionDB(db_path=db_path)
+    try:
+        durable = reopened.get_messages_as_conversation(session_id)
+        retained = next(message for message in durable if message.get("content") == "retained tail question")
+        assert retained["timestamp"] == STAMP + 30
+        assert retained["api_content"] == retained_sidecar
+        resumed_agent = agent_for(reopened)
+        resumed = resumed_agent.run_conversation(
+            "resume after compaction", conversation_history=durable, task_id="compaction-restart",
+            persist_user_timestamp=STAMP + 90,
+        )
+        assert resumed["completed"] is True
+        assert any(message.get("content") == retained_sidecar for message in captured[0]["input"])
+        retained_returned = next(
+            message for message in resumed["messages"] if message.get("content") == "retained tail question"
+        )
+        assert retained_returned["timestamp"] == STAMP + 30
+        assert retained_returned["api_content"] == retained_sidecar
+    finally:
+        reopened.close()
+
+
+def test_timestamped_turn_recovers_clean_canonical_history_after_provider_failure(tmp_path, monkeypatch):
+    """A failed direct turn persists clean data that a new agent can timestamp on resume."""
+    from hermes_state import SessionDB
+    from openai.types.responses import Response
+    from run_agent import AIAgent
+
+    db_path = tmp_path / "state.db"
+    session_id = "timestamp-failure-restart"
+    db = SessionDB(db_path=db_path)
+    captured = []
+
+    def agent_for(database):
+        agent = AIAgent(
+            api_key="test-key", base_url="http://127.0.0.1:1/v1", provider="openai-compat",
+            model="test-model", api_mode="codex_responses", max_iterations=1,
+            enabled_toolsets=[], quiet_mode=True, skip_context_files=True, skip_memory=True,
+            save_trajectories=False, session_db=database, session_id=session_id,
+        )
+        agent._cached_system_prompt = "Stable synthetic system prompt."
+        return agent
+
+    def recovered_response(kwargs, **unused):
+        captured.append(deepcopy(kwargs))
+        return Response.model_validate({
+            "id": "resp_recovered", "object": "response", "created_at": STAMP,
+            "model": "test-model", "status": "completed",
+            "output": [{
+                "type": "message", "id": "msg_recovered", "role": "assistant",
+                "status": "completed", "phase": "final_answer",
+                "content": [{"type": "output_text", "text": "recovered", "annotations": []}],
+            }],
+            "usage": None, "error": None, "incomplete_details": None,
+            "instructions": None, "metadata": {}, "parallel_tool_calls": True,
+            "temperature": None, "tool_choice": "auto", "tools": [], "top_p": None,
+        })
+
+    monkeypatch.setattr("hermes_cli.config.load_config_readonly", lambda: {
+        "message_timestamps": {"enabled": True},
+    })
+    monkeypatch.setattr("hermes_time.get_timezone", lambda: ZoneInfo("UTC"))
+    try:
+        failing_agent = agent_for(db)
+        monkeypatch.setattr(
+            failing_agent, "_interruptible_streaming_api_call",
+            lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("synthetic provider failure")),
+        )
+        monkeypatch.setattr(
+            failing_agent, "_interruptible_api_call",
+            lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("synthetic provider failure")),
+        )
+        failed = failing_agent.run_conversation(
+            "failed question", task_id="failure", persist_user_timestamp=STAMP,
+        )
+        assert failed["completed"] is False
+    finally:
+        db.close()
+
+    reopened = SessionDB(db_path=db_path)
+    try:
+        durable = reopened.get_messages_as_conversation(session_id)
+        failed_user = next(message for message in durable if message.get("role") == "user")
+        assert failed_user["content"] == "failed question"
+        assert failed_user["timestamp"] == STAMP
+        recovered_agent = agent_for(reopened)
+        monkeypatch.setattr(recovered_agent, "_interruptible_streaming_api_call", recovered_response)
+        monkeypatch.setattr(recovered_agent, "_interruptible_api_call", recovered_response)
+        recovered = recovered_agent.run_conversation(
+            "resume question", conversation_history=durable, task_id="recovery",
+            persist_user_timestamp=STAMP + 30,
+        )
+        assert recovered["completed"] is True
+        # Failure leaves no assistant row, so the normal alternation repair merges
+        # the resumed input into the retained user row. The original logical input
+        # must stay once with its original timestamp rather than be restamped.
+        resumed_wire = captured[0]["input"][0]["content"]
+        assert resumed_wire.startswith("[Thu 2026-08-20 12:00:00 UTC] failed question")
+        assert resumed_wire.count("failed question") == 1
+        assert resumed_wire.count("resume question") == 1
+        # The ordinary alternation repair is retained history policy, not the
+        # timestamp projection; it remains clean and contains each logical ask once.
+        assert recovered["messages"][0]["content"] == "failed question\n\nresume question"
+    finally:
+        reopened.close()
