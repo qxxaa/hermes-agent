@@ -430,6 +430,28 @@ class _TurnRun:
     prompt_text: str = ""
     marker_key: str = ""
     receipt_attempted: bool = False
+    persist_user_timestamp: float | None = None
+
+
+def _prepare_native_image_caption(prompt: Any) -> tuple[Any, Any, float | None]:
+    """Prepare a fresh native caption before it becomes structured content parts."""
+    if not isinstance(prompt, str):
+        return prompt, prompt, None
+    from agent.message_timestamps import (
+        message_timestamps_enabled,
+        prepare_fresh_user_message,
+        render_user_content_with_timestamp,
+    )
+    from hermes_cli.config import load_config_readonly
+    from hermes_time import get_timezone
+
+    tz = get_timezone()
+    clean_prompt, timestamp = prepare_fresh_user_message(prompt, time.time(), tz=tz)
+    if not clean_prompt:
+        return clean_prompt, clean_prompt, timestamp
+    if message_timestamps_enabled(load_config_readonly()):
+        return clean_prompt, render_user_content_with_timestamp(clean_prompt, timestamp, tz=tz), timestamp
+    return clean_prompt, clean_prompt, timestamp
 
 
 def _prepare_turn_input(sid: str, session: dict, st: _TurnRun, text: Any, images: list[str]):
@@ -489,8 +511,11 @@ def _prepare_turn_input(sid: str, session: dict, st: _TurnRun, text: Any, images
                 "error", sid, {"message": "\n".join(ctx.warnings) or "Context injection refused."})
             return None
         prompt = ctx.message
+    api_prompt = prompt
+    if images:
+        prompt, api_prompt, st.persist_user_timestamp = _prepare_native_image_caption(prompt)
     st.prompt_text = prompt if isinstance(prompt, str) else ""
-    run_message: Any = _route_turn_images(agent, prompt, images) if images else prompt
+    run_message: Any = _route_turn_images(agent, api_prompt, images) if images else prompt
     st.tts_queue, st.thinking_started = _start_turn_voice()
     # Per-turn API-message notes: barge mid-speech, reactions, HUD surface (per-turn state
     # that must not touch the byte-stable system prompt).
@@ -530,6 +555,8 @@ def _invoke_agent(
         "stream_callback": _stream,
         "persist_user_message": (
             _build_persist_user_message(prompt, images, run_message) if images else prompt)}
+    if st.persist_user_timestamp is not None:
+        run_kwargs["persist_user_timestamp"] = st.persist_user_timestamp
     try:
         run_params = inspect.signature(agent.run_conversation).parameters
     except (TypeError, ValueError):
