@@ -3,6 +3,8 @@
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
+import pytest
+
 
 def test_non_gateway_config_falls_back_to_legacy_without_overriding_gateway_route():
     from agent.message_timestamps import message_timestamps_enabled
@@ -22,6 +24,48 @@ def test_non_gateway_config_falls_back_to_legacy_without_overriding_gateway_rout
     assert message_timestamps_enabled(conflicting_disabled) is True
     assert message_timestamps_enabled(conflicting_enabled, messaging_gateway=True) is True
     assert message_timestamps_enabled(conflicting_disabled, messaging_gateway=True) is False
+
+
+@pytest.mark.parametrize(
+    ("config", "non_gateway", "messaging_gateway"),
+    [
+        ({}, False, False),
+        ({"gateway": {"message_timestamps": True}}, True, True),
+        ({"gateway": {"message_timestamps": False}}, False, False),
+        ({"message_timestamps": {"enabled": None}, "gateway": {"message_timestamps": True}}, True, True),
+        ({"message_timestamps": {"enabled": False}, "gateway": {"message_timestamps": True}}, False, True),
+        ({"message_timestamps": {"enabled": True}, "gateway": {"message_timestamps": False}}, True, False),
+    ],
+)
+def test_timestamp_configuration_precedence_is_route_scoped(config, non_gateway, messaging_gateway):
+    from agent.message_timestamps import message_timestamps_enabled
+
+    assert message_timestamps_enabled(config) is non_gateway
+    assert message_timestamps_enabled(config, messaging_gateway=True) is messaging_gateway
+
+
+def test_timestamp_config_isolated_between_profile_homes(tmp_path, monkeypatch):
+    """Each profile's resolved home controls the non-gateway toggle independently."""
+    from agent.message_timestamps import message_timestamps_enabled
+    from hermes_cli.config import load_config_readonly
+
+    enabled_home = tmp_path / "profiles" / "enabled"
+    disabled_home = tmp_path / "profiles" / "disabled"
+    enabled_home.mkdir(parents=True)
+    disabled_home.mkdir(parents=True)
+    (enabled_home / "config.yaml").write_text(
+        "message_timestamps:\n  enabled: true\n",
+        encoding="utf-8",
+    )
+    (disabled_home / "config.yaml").write_text(
+        "message_timestamps:\n  enabled: false\n",
+        encoding="utf-8",
+    )
+
+    monkeypatch.setenv("HERMES_HOME", str(enabled_home))
+    assert message_timestamps_enabled(load_config_readonly()) is True
+    monkeypatch.setenv("HERMES_HOME", str(disabled_home))
+    assert message_timestamps_enabled(load_config_readonly()) is False
 
 
 def test_non_gateway_rendering_keeps_structured_content_and_clean_history_immutable():
