@@ -3,6 +3,7 @@
 from copy import deepcopy
 from datetime import datetime
 import json
+from types import SimpleNamespace
 from zoneinfo import ZoneInfo
 
 import pytest
@@ -125,6 +126,64 @@ def test_direct_agent_keeps_fresh_recovery_shaped_input_at_provider_boundary(tmp
             "[Thu 2026-08-20 12:00:00 UTC] " + fresh
         )
         assert result["messages"][-2]["content"] == fresh
+    finally:
+        db.close()
+
+
+def test_direct_agent_global_timestamp_reaches_chat_completions_request(tmp_path, monkeypatch):
+    """The Chat Completions wire copy is rendered while durable rows stay canonical."""
+    from hermes_state import SessionDB
+    from run_agent import AIAgent
+
+    captured = []
+    db = SessionDB(db_path=tmp_path / "state.db")
+
+    def respond(kwargs):
+        captured.append(deepcopy(kwargs))
+        return SimpleNamespace(
+            choices=[SimpleNamespace(
+                message=SimpleNamespace(content="done", tool_calls=None), finish_reason="stop",
+            )],
+            model="test-model", usage=None,
+        )
+
+    try:
+        agent = AIAgent(
+            api_key="test-key", base_url="http://127.0.0.1:1/v1", provider="openai-compat",
+            model="test-model", api_mode="chat_completions", max_iterations=1,
+            enabled_toolsets=[], quiet_mode=True, skip_context_files=True,
+            skip_memory=True, save_trajectories=False, session_db=db, session_id="timestamp-chat",
+        )
+        agent._cached_system_prompt = "Stable synthetic system prompt."
+        agent._disable_streaming = True
+        monkeypatch.setattr("hermes_cli.config.load_config_readonly", lambda: {
+            "message_timestamps": {"enabled": True},
+        })
+        monkeypatch.setattr("hermes_time.get_timezone", lambda: ZoneInfo("UTC"))
+        monkeypatch.setattr(agent, "_interruptible_api_call", respond)
+
+        result = agent.run_conversation(
+            "current question",
+            conversation_history=[
+                {"role": "user", "content": "earlier question", "timestamp": STAMP},
+                {"role": "assistant", "content": "earlier answer"},
+            ],
+            task_id="timestamp-chat",
+            persist_user_timestamp=STAMP,
+        )
+
+        assert result["completed"] is True
+        wire_users = [message["content"] for message in captured[0]["messages"] if message["role"] == "user"]
+        assert wire_users == [
+            "[Thu 2026-08-20 12:00:00 UTC] earlier question",
+            "[Thu 2026-08-20 12:00:00 UTC] current question",
+        ]
+        assert result["messages"][0]["content"] == "earlier question"
+        assert result["messages"][-2]["content"] == "current question"
+        persisted = db.get_messages_as_conversation("timestamp-chat")
+        persisted_users = [message for message in persisted if message["role"] == "user"]
+        assert [message["content"] for message in persisted_users] == ["current question"]
+        assert persisted_users[0]["timestamp"] == STAMP
     finally:
         db.close()
 

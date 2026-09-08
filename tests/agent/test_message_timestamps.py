@@ -69,7 +69,7 @@ def test_timestamp_config_isolated_between_profile_homes(tmp_path, monkeypatch):
 
 
 def test_non_gateway_rendering_keeps_structured_content_and_clean_history_immutable():
-    from agent.message_timestamps import render_turn_with_message_timestamps
+    from agent.message_timestamps import render_message_timestamp_replay
 
     tz = ZoneInfo("Europe/Berlin")
     timestamp = datetime(2026, 4, 28, 13, 42, 10, tzinfo=tz).timestamp()
@@ -79,22 +79,21 @@ def test_non_gateway_rendering_keeps_structured_content_and_clean_history_immuta
         {"type": "image_url", "image_url": {"url": "data:image/png;base64,AA=="}},
     ]
 
-    rendered_history, rendered_user, persisted_timestamp = render_turn_with_message_timestamps(
-        history,
-        structured,
-        config={"message_timestamps": {"enabled": True}},
-        current_timestamp=timestamp,
+    replay, current_idx = render_message_timestamp_replay(
+        history + [{"role": "user", "content": structured}],
+        enabled=True,
+        current_turn_user_idx=1,
         tz=tz,
     )
 
     assert history == [{"role": "user", "content": "earlier", "timestamp": timestamp}]
-    assert rendered_history[0]["content"] == "[Tue 2026-04-28 13:42:10 CEST] earlier"
-    assert rendered_user is structured
-    assert persisted_timestamp == timestamp
+    assert replay[0]["content"] == "[Tue 2026-04-28 13:42:10 CEST] earlier"
+    assert replay[1]["content"] is structured
+    assert current_idx == 1
 
 
 def test_history_cleanup_invalidates_sidecars_and_keeps_compatible_rendered_sidecars_exact():
-    from agent.message_timestamps import render_turn_with_message_timestamps
+    from agent.message_timestamps import render_message_timestamp_replay
 
     tz = ZoneInfo("UTC")
     timestamp = datetime(2026, 8, 20, 12, 0, tzinfo=tz).timestamp()
@@ -114,11 +113,10 @@ def test_history_cleanup_invalidates_sidecars_and_keeps_compatible_rendered_side
         },
     ]
 
-    replay, _, _ = render_turn_with_message_timestamps(
+    replay, _ = render_message_timestamp_replay(
         history,
-        "next",
-        config={"message_timestamps": {"enabled": True}},
-        current_timestamp=timestamp,
+        enabled=True,
+        current_turn_user_idx=len(history),
         tz=tz,
     )
 
@@ -129,7 +127,7 @@ def test_history_cleanup_invalidates_sidecars_and_keeps_compatible_rendered_side
 
 
 def test_history_cleanup_runs_when_timestamp_rendering_is_disabled():
-    from agent.message_timestamps import render_turn_with_message_timestamps
+    from agent.message_timestamps import render_message_timestamp_replay
 
     history = [{
         "role": "user",
@@ -137,14 +135,13 @@ def test_history_cleanup_runs_when_timestamp_rendering_is_disabled():
         "api_content": "stale sidecar",
     }]
 
-    replay, _, rendered_timestamp = render_turn_with_message_timestamps(
+    replay, _ = render_message_timestamp_replay(
         history,
-        "next",
-        config={"message_timestamps": {"enabled": False}},
+        enabled=False,
+        current_turn_user_idx=len(history),
     )
 
     assert replay == [{"role": "user", "content": "actual question"}]
-    assert rendered_timestamp is None
 
 
 def test_merged_defaults_leave_global_setting_unset_for_legacy_fallback(tmp_path, monkeypatch):
