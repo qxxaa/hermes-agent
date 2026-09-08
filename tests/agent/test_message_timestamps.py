@@ -1,6 +1,7 @@
 """Cross-channel timestamp rendering follows the messaging gateway contract."""
 
 from datetime import datetime
+import json
 from zoneinfo import ZoneInfo
 
 import pytest
@@ -225,3 +226,63 @@ def test_merged_defaults_preserve_unspecified_gateway_setting_for_global_enable(
     assert config["gateway"]["message_timestamps"]["enabled"] is None
     assert message_timestamps_enabled(config, messaging_gateway=True) is True
     assert message_timestamps_enabled(config) is True
+
+
+@pytest.mark.parametrize(
+    ("raw_config", "gateway_expected", "non_gateway_expected"),
+    [
+        ({"message_timestamps": {"enabled": True}, "gateway": {"message_timestamps": {"enabled": True}}}, True, True),
+        ({"message_timestamps": {"enabled": True}, "gateway": {"message_timestamps": {"enabled": False}}}, False, True),
+        ({"message_timestamps": {"enabled": True}}, True, True),
+        ({"message_timestamps": {"enabled": False}, "gateway": {"message_timestamps": {"enabled": True}}}, True, False),
+        ({"message_timestamps": {"enabled": False}, "gateway": {"message_timestamps": {"enabled": False}}}, False, False),
+        ({"message_timestamps": {"enabled": False}}, False, False),
+        ({"gateway": {"message_timestamps": {"enabled": True}}}, True, True),
+        ({"gateway": {"message_timestamps": {"enabled": False}}}, False, False),
+        ({}, False, False),
+    ],
+)
+def test_merged_timestamp_configuration_tri_state_matrix(
+    tmp_path, monkeypatch, raw_config, gateway_expected, non_gateway_expected,
+):
+    """Each logical row resolves from the real merged, profile-scoped config loader."""
+    from agent.message_timestamps import message_timestamps_enabled
+    from hermes_cli.config import load_config_readonly
+
+    hermes_home = tmp_path / "profiles" / "matrix"
+    hermes_home.mkdir(parents=True)
+    (hermes_home / "config.yaml").write_text(json.dumps(raw_config), encoding="utf-8")
+    monkeypatch.setenv("HERMES_HOME", str(hermes_home))
+
+    config = load_config_readonly()
+
+    assert message_timestamps_enabled(config, messaging_gateway=True) is gateway_expected
+    assert message_timestamps_enabled(config) is non_gateway_expected
+
+
+@pytest.mark.parametrize(
+    ("raw_config", "gateway_expected", "non_gateway_expected"),
+    [
+        ({"message_timestamps": {"enabled": None}, "gateway": {"message_timestamps": True}}, True, True),
+        ({"message_timestamps": {"enabled": None}, "gateway": {"message_timestamps": False}}, False, False),
+        ({"message_timestamps": {"enabled": True}, "gateway": {"message_timestamps": None}}, True, True),
+        ({"message_timestamps": {"enabled": True}, "gateway": {"message_timestamps": {"enabled": None}}}, True, True),
+        ({"message_timestamps": {"enabled": False}, "gateway": {"message_timestamps": None}}, False, False),
+    ],
+)
+def test_merged_timestamp_configuration_distinguishes_unspecified_representations(
+    tmp_path, monkeypatch, raw_config, gateway_expected, non_gateway_expected,
+):
+    """Null mappings/values stay unspecified; gateway Boolean shorthand remains explicit."""
+    from agent.message_timestamps import message_timestamps_enabled
+    from hermes_cli.config import load_config_readonly
+
+    hermes_home = tmp_path / "profiles" / "representations"
+    hermes_home.mkdir(parents=True)
+    (hermes_home / "config.yaml").write_text(json.dumps(raw_config), encoding="utf-8")
+    monkeypatch.setenv("HERMES_HOME", str(hermes_home))
+
+    config = load_config_readonly()
+
+    assert message_timestamps_enabled(config, messaging_gateway=True) is gateway_expected
+    assert message_timestamps_enabled(config) is non_gateway_expected

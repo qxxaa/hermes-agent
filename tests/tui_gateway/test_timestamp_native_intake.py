@@ -46,8 +46,17 @@ def test_tui_prompt_turn_stages_clean_persistence_and_timestamped_provider_reque
         )
         agent._cached_system_prompt = "Stable synthetic system prompt."
         agent._disable_streaming = True
+        pre_loop_messages = []
+        persist_session = agent._persist_session
+
+        def capture_pre_loop(messages, history):
+            pre_loop_messages.append(deepcopy(messages))
+            return persist_session(messages, history)
+
+        monkeypatch.setattr(agent, "_persist_session", capture_pre_loop)
         monkeypatch.setattr("hermes_cli.config.load_config_readonly", lambda: {
             "message_timestamps": {"enabled": True},
+            "auxiliary": {"title_generation": {"enabled": False}},
         })
         monkeypatch.setattr("hermes_time.get_timezone", lambda: ZoneInfo("UTC"))
         monkeypatch.setattr("agent.turn_context.time.time", lambda: STAMP)
@@ -70,6 +79,10 @@ def test_tui_prompt_turn_stages_clean_persistence_and_timestamped_provider_reque
 
         assert st.result["completed"] is True
         assert st.run_kwargs["persist_user_message"] == "current question"
+        assert [message["content"] for message in pre_loop_messages[0] if message["role"] == "user"] == [
+            "[Thu 2026-08-20 12:00:00 UTC] earlier question",
+            "[Thu 2026-08-20 12:00:00 UTC] current question",
+        ]
         wire_users = [message["content"] for message in captured[0]["messages"] if message["role"] == "user"]
         assert wire_users == [
             "[Thu 2026-08-20 12:00:00 UTC] earlier question",

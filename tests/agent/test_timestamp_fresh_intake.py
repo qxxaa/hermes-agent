@@ -28,7 +28,8 @@ def _chat_response(captured):
 def test_staged_cli_admission_timestamp_is_reused_for_wire_sidecar_and_persistence(
     tmp_path, monkeypatch, enabled,
 ):
-    """A real staged CLI dict keeps its accepted time when the loop starts later."""
+    """Normal CLI staging carries its accepted time through the pre-loop boundary."""
+    from cli import HermesCLI, _ChatTurn
     from hermes_state import SessionDB
     from run_agent import AIAgent
 
@@ -44,23 +45,52 @@ def test_staged_cli_admission_timestamp_is_reused_for_wire_sidecar_and_persisten
         )
         agent._cached_system_prompt = "Stable synthetic system prompt."
         agent._disable_streaming = True
-        # This is the exact CLI staging shape; run_conversation intentionally receives no timestamp.
-        agent._pending_cli_user_message = {"role": "user", "content": "current question", "timestamp": T0}
+        pre_loop_messages = []
+        persist_session = agent._persist_session
+
+        def capture_pre_loop(messages, history):
+            pre_loop_messages.append(deepcopy(messages))
+            return persist_session(messages, history)
+
+        monkeypatch.setattr(agent, "_persist_session", capture_pre_loop)
         monkeypatch.setattr("hermes_cli.config.load_config_readonly", lambda: {
             "message_timestamps": {"enabled": enabled},
+            "auxiliary": {"title_generation": {"enabled": False}},
         })
         monkeypatch.setattr("hermes_time.get_timezone", lambda: ZoneInfo("UTC"))
+        monkeypatch.setattr("agent.message_metadata.wall_time", lambda: T0)
         monkeypatch.setattr("agent.turn_context.time.time", lambda: T1)
         monkeypatch.setattr("agent.turn_context._collect_pre_llm_call_context", lambda *args, **kwargs: "plugin context")
         monkeypatch.setattr(agent, "_interruptible_api_call", _chat_response(captured))
 
-        result = agent.run_conversation("current question", task_id="staged-cli")
+        cli = HermesCLI.__new__(HermesCLI)
+        cli.agent = agent
+        cli.session_id = agent.session_id
+        cli.conversation_history = [
+            {"role": "user", "content": "earlier question", "timestamp": T0},
+            {"role": "assistant", "content": "earlier answer"},
+        ]
+        cli._sudo_password_callback = None
+        cli._approval_callback = None
+        cli._secret_capture_callback = None
+        cli._flush_credit_notices = lambda: None
+        # _chat_run_agent writes the real run result onto the supplied turn object.
+        turn = _ChatTurn()
+        cli._chat_stage_user_message(agent, "current question")
+        cli._chat_run_agent(turn, "current question")
+        result = turn.result
 
         rendered = "[Thu 2026-08-20 12:00:00 UTC] current question" if enabled else "current question"
         expected_sidecar = rendered + "\n\nplugin context"
         assert result["completed"] is True
-        assert [m["content"] for m in captured[0]["messages"] if m["role"] == "user"] == [expected_sidecar]
-        current = next(message for message in result["messages"] if message["role"] == "user")
+        historical = "[Thu 2026-08-20 12:00:00 UTC] earlier question" if enabled else "earlier question"
+        assert [message["content"] for message in pre_loop_messages[0] if message["role"] == "user"] == [
+            historical, rendered,
+        ]
+        assert [m["content"] for m in captured[0]["messages"] if m["role"] == "user"] == [
+            historical, expected_sidecar,
+        ]
+        current = next(message for message in reversed(result["messages"]) if message["role"] == "user")
         assert current["content"] == "current question"
         assert current["timestamp"] == T0
         assert current["api_content"] == expected_sidecar
@@ -70,7 +100,7 @@ def test_staged_cli_admission_timestamp_is_reused_for_wire_sidecar_and_persisten
     reopened = SessionDB(db_path=db_path)
     try:
         stored = reopened.get_messages_as_conversation(f"staged-cli-{enabled}")
-        current = next(message for message in stored if message["role"] == "user")
+        current = next(message for message in reversed(stored) if message["role"] == "user")
         assert current["content"] == "current question"
         assert current["timestamp"] == T0
         assert current["api_content"] == expected_sidecar
