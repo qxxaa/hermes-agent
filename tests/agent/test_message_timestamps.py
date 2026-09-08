@@ -176,3 +176,52 @@ def test_merged_defaults_leave_global_setting_unset_for_legacy_fallback(tmp_path
 
     assert config["message_timestamps"]["enabled"] is None
     assert message_timestamps_enabled(config) is True
+
+
+@pytest.mark.parametrize(
+    ("global_enabled", "gateway_enabled", "gateway_expected", "non_gateway_expected"),
+    [
+        (True, True, True, True),
+        (True, False, False, True),
+        (True, None, True, True),
+        (False, True, True, False),
+        (False, False, False, False),
+        (False, None, False, False),
+        (None, True, True, True),
+        (None, False, False, False),
+        (None, None, False, False),
+    ],
+)
+def test_timestamp_configuration_complete_tri_state_matrix(
+    global_enabled, gateway_enabled, gateway_expected, non_gateway_expected,
+):
+    from agent.message_timestamps import message_timestamps_enabled
+
+    config = {}
+    if global_enabled is not None:
+        config["message_timestamps"] = {"enabled": global_enabled}
+    if gateway_enabled is not None:
+        config["gateway"] = {"message_timestamps": {"enabled": gateway_enabled}}
+    elif global_enabled is not None:
+        config["gateway"] = {"message_timestamps": None}
+
+    assert message_timestamps_enabled(config, messaging_gateway=True) is gateway_expected
+    assert message_timestamps_enabled(config) is non_gateway_expected
+
+
+def test_merged_defaults_preserve_unspecified_gateway_setting_for_global_enable(tmp_path, monkeypatch):
+    from agent.message_timestamps import message_timestamps_enabled
+    from hermes_cli.config import load_config_readonly
+
+    hermes_home = tmp_path / ".hermes"
+    hermes_home.mkdir()
+    (hermes_home / "config.yaml").write_text(
+        "message_timestamps:\n  enabled: true\n", encoding="utf-8",
+    )
+    monkeypatch.setenv("HERMES_HOME", str(hermes_home))
+
+    config = load_config_readonly()
+
+    assert config["gateway"]["message_timestamps"]["enabled"] is None
+    assert message_timestamps_enabled(config, messaging_gateway=True) is True
+    assert message_timestamps_enabled(config) is True

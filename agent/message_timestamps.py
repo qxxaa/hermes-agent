@@ -104,30 +104,39 @@ def render_user_content_with_timestamp(content: str, ts_value: Any = None, tz=No
     return f"{prefix} {clean_content}" if prefix and clean_content else (prefix or clean_content)
 
 
-def _legacy_gateway_message_timestamps_enabled(config: Optional[dict]) -> bool:
+def _explicit_global_message_timestamps_enabled(config: Optional[dict]) -> Optional[bool]:
+    configured = config.get("message_timestamps") if isinstance(config, dict) else None
+    if isinstance(configured, dict) and isinstance(configured.get("enabled"), bool):
+        return configured["enabled"]
+    return None
+
+
+def _explicit_gateway_message_timestamps_enabled(config: Optional[dict]) -> Optional[bool]:
     if not isinstance(config, dict):
-        return False
+        return None
     gateway = config.get("gateway")
     if not isinstance(gateway, dict):
-        return False
+        return None
     configured = gateway.get("message_timestamps")
-    if isinstance(configured, dict):
-        return bool(configured.get("enabled", False))
-    return bool(configured)
+    if isinstance(configured, bool):
+        return configured
+    if isinstance(configured, dict) and isinstance(configured.get("enabled"), bool):
+        return configured["enabled"]
+    return None
 
 
 def message_timestamps_enabled(config: Optional[dict], *, messaging_gateway: bool = False) -> bool:
     """Resolve timestamps for the actual execution route.
 
-    Messaging gateway turns retain their legacy-only gate. Other callers use
-    an explicit top-level Boolean and otherwise retain the legacy fallback.
+    Gateway turns prefer an explicit gateway setting, then an explicit global
+    setting. Other turns use the inverse order. Missing and null settings are
+    unspecified; the effective default is off.
     """
+    global_enabled = _explicit_global_message_timestamps_enabled(config)
+    gateway_enabled = _explicit_gateway_message_timestamps_enabled(config)
     if messaging_gateway:
-        return _legacy_gateway_message_timestamps_enabled(config)
-    configured = config.get("message_timestamps") if isinstance(config, dict) else None
-    if isinstance(configured, dict) and isinstance(configured.get("enabled"), bool):
-        return configured["enabled"]
-    return _legacy_gateway_message_timestamps_enabled(config)
+        return gateway_enabled if gateway_enabled is not None else (global_enabled or False)
+    return global_enabled if global_enabled is not None else (gateway_enabled or False)
 
 
 _AUTO_CONTINUE_NOTE_PREFIXES = (

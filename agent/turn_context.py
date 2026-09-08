@@ -344,7 +344,7 @@ class TurnContext:
     plugin_user_context: str = ""  # ``pre_llm_call`` context (appended to user message)
     ext_prefetch_cache: str = ""  # external-memory prefetch, reused across iterations
     preflight_compression_blocked: bool = False  # immediate retry proved ineffective
-    message_timestamp_replay_enabled: Optional[bool] = None  # None when intake owns replay
+
 
 
 def _persist_under_lock(agent: Any, fn, failure_msg: str, pending_cli_message: Any) -> None:
@@ -820,7 +820,8 @@ def build_turn_context(
     # The common agent route only owns timestamps for native/direct callers.
     # Messaging gateway intake either prepared replay already or deliberately
     # bypasses timestamps on routes the upstream gateway never timestamped.
-    message_timestamp_replay_enabled = None
+    message_timestamps_are_enabled = False
+    message_timestamp_timezone = None
     if message_timestamp_handling == "agent":
         original_user_message = (
             persist_user_message if persist_user_message is not None else user_message
@@ -830,11 +831,13 @@ def build_turn_context(
                 coerce_message_timestamp,
                 message_timestamps_enabled,
                 prepare_fresh_user_message,
+                render_user_content_with_timestamp,
             )
             from hermes_cli.config import load_config_readonly
             from hermes_time import get_timezone
 
-            message_timestamp_replay_enabled = message_timestamps_enabled(load_config_readonly())
+            message_timestamps_are_enabled = message_timestamps_enabled(load_config_readonly())
+            message_timestamp_timezone = get_timezone()
             staged_timestamp = None
             pending_cli_message = getattr(agent, "_pending_cli_user_message", None)
             if (
@@ -847,12 +850,21 @@ def build_turn_context(
                 clean_user_message, admission_timestamp = prepare_fresh_user_message(
                     original_user_message,
                     persist_user_timestamp if persist_user_timestamp is not None else staged_timestamp,
-                    tz=get_timezone(),
+                    tz=message_timestamp_timezone,
                 )
-                if admission_timestamp is None and message_timestamp_replay_enabled:
-                    admission_timestamp = coerce_message_timestamp(time.time(), tz=get_timezone())
-                if persist_user_message is None or user_message == original_user_message:
-                    user_message = clean_user_message
+                if admission_timestamp is None and message_timestamps_are_enabled:
+                    admission_timestamp = coerce_message_timestamp(time.time(), tz=message_timestamp_timezone)
+                if isinstance(user_message, str):
+                    model_user_message = (
+                        clean_user_message
+                        if persist_user_message is None or user_message == original_user_message
+                        else user_message
+                    )
+                    user_message = (
+                        render_user_content_with_timestamp(
+                            model_user_message, admission_timestamp, tz=message_timestamp_timezone,
+                        ) if message_timestamps_are_enabled else model_user_message
+                    )
                 persist_user_message = clean_user_message
                 if admission_timestamp is not None:
                     persist_user_timestamp = admission_timestamp
@@ -874,8 +886,23 @@ def build_turn_context(
         _msg_preview.replace("\n", " "),
     )
 
+    persistence_history = conversation_history
     # Copy so the caller's list is never mutated.
     messages = list(conversation_history) if conversation_history else []
+    if message_timestamp_handling == "agent":
+        try:
+            from agent.message_timestamps import render_message_timestamp_replay
+
+            messages, _ = render_message_timestamp_replay(
+                messages, enabled=message_timestamps_are_enabled,
+                current_turn_user_idx=len(messages), tz=message_timestamp_timezone,
+            )
+            # The rendered copies are working history, not new transcript rows.
+            # Give the existing identity-based persistence boundary the prepared
+            # historical objects without including this turn's newly appended user.
+            persistence_history = list(messages)
+        except Exception:
+            logger.debug("message timestamp history preparation skipped", exc_info=True)
     user_msg, pending_cli_message = _stage_turn_user_message(
         agent, user_message, persist_user_message, persist_user_timestamp,
         persist_user_platform_id, persist_user_display_kind, persist_user_display_metadata,
@@ -950,21 +977,12 @@ def build_turn_context(
         and 0 <= current_turn_user_idx < len(messages)
         and messages[current_turn_user_idx].get("role") == "user"
     ):
-        api_user_content = user_message
-        if message_timestamp_replay_enabled and isinstance(user_message, str):
-            from agent.message_timestamps import render_user_content_with_timestamp
-            from hermes_time import get_timezone
-
-            api_user_content = render_user_content_with_timestamp(
-                user_message, persist_user_timestamp, tz=get_timezone()
-            )
         _stamp_api_content_sidecar(
             agent, messages, current_turn_user_idx, ext_prefetch_cache,
             plugin_user_context, preflight_compressed=compaction.compressed,
-            api_user_content=api_user_content,
         )
 
-    _persist_turn_start(agent, messages, conversation_history, pending_cli_message)
+    _persist_turn_start(agent, messages, persistence_history, pending_cli_message)
 
     # Title the session now: the row exists and titling depends only on the user's ask,
     # so it runs concurrently with the turn. Daemon thread, no-op once titled.
@@ -977,7 +995,6 @@ def build_turn_context(
         current_turn_user_idx=current_turn_user_idx, should_review_memory=should_review_memory,
         plugin_user_context=plugin_user_context, ext_prefetch_cache=ext_prefetch_cache,
         preflight_compression_blocked=compaction.blocked,
-        message_timestamp_replay_enabled=message_timestamp_replay_enabled,
     )
 
 
@@ -1003,7 +1020,6 @@ def _sanitize_model_for(agent: Any, moa_config: Any) -> Any:
 def build_api_messages(
     agent: Any, messages: List[Dict[str, Any]], *, current_turn_user_idx: Any,
     ext_prefetch_cache: Any, plugin_user_context: Any, moa_config: Any, active_system_prompt: Any,
-    message_timestamp_replay_enabled: Optional[bool] = None,
 ) -> Tuple[List[Dict[str, Any]], str]:
     """Build the wire copy of ``messages`` for one API call plus the effective system
     message. Returns ``(api_messages, effective_system)``.
@@ -1018,16 +1034,6 @@ def build_api_messages(
     from agent.agent_runtime_helpers import fill_empty_non_final_wire_payload
     from agent.conversation_loop import _clone_message_for_send
 
-    if message_timestamp_replay_enabled is not None:
-        from agent.message_timestamps import render_message_timestamp_replay
-        from hermes_time import get_timezone
-
-        messages, current_turn_user_idx = render_message_timestamp_replay(
-            messages,
-            enabled=message_timestamp_replay_enabled,
-            current_turn_user_idx=current_turn_user_idx,
-            tz=get_timezone(),
-        )
 
     api_messages = []
     for idx, msg in enumerate(messages):

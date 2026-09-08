@@ -105,7 +105,7 @@ def test_full_builder_to_responses_keeps_cross_turn_prefix(responses_agent, tmp_
         [{"type": "message", "id": "msg_done", "role": "assistant", "status": "completed", "phase": "final_answer", "content": [{"type": "output_text", "text": "done", "annotations": []}]}],
     ])
     current = _render("first question") if timestamps else "first question"
-    result = agent.run_conversation(current, conversation_history=[], task_id="first", persist_user_message="first question", persist_user_timestamp=STAMP)
+    result = agent.run_conversation(current, conversation_history=[], task_id="first", persist_user_message="first question", persist_user_timestamp=STAMP, message_timestamp_handling="gateway_prepared")
     assert result["completed"]
     assert len(captured) == 2
     first_input = captured[0]["input"]
@@ -129,7 +129,7 @@ def test_full_builder_to_responses_keeps_cross_turn_prefix(responses_agent, tmp_
     else:
         agent = make_agent()
     next_user = _render("second question", STAMP + 30) if timestamps else "second question"
-    result = agent.run_conversation(next_user, conversation_history=replay, task_id="second", persist_user_message="second question", persist_user_timestamp=STAMP + 30)
+    result = agent.run_conversation(next_user, conversation_history=replay, task_id="second", persist_user_message="second question", persist_user_timestamp=STAMP + 30, message_timestamp_handling="gateway_prepared")
     assert result["completed"]
     assert len(captured) == 3
     next_input = captured[2]["input"]

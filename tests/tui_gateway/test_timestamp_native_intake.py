@@ -75,6 +75,9 @@ def test_tui_prompt_turn_stages_clean_persistence_and_timestamped_provider_reque
             "[Thu 2026-08-20 12:00:00 UTC] earlier question",
             "[Thu 2026-08-20 12:00:00 UTC] current question",
         ]
+        assert [message["content"] for message in st.result["messages"] if message["role"] == "user"] == [
+            "[Thu 2026-08-20 12:00:00 UTC] earlier question", "current question",
+        ]
         persisted = db.get_messages_as_conversation("timestamp-tui")
         persisted_user = next(message for message in persisted if message["role"] == "user")
         assert persisted_user["content"] == "current question"

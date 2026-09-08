@@ -45,6 +45,14 @@ def test_direct_agent_global_timestamp_reaches_responses_request(tmp_path, monke
             skip_memory=True, save_trajectories=False, session_db=db, session_id="timestamp-direct",
         )
         agent._cached_system_prompt = "Stable synthetic system prompt."
+        pre_loop_messages = []
+        persist_session = agent._persist_session
+
+        def capture_pre_loop(messages, history):
+            pre_loop_messages.append(deepcopy(messages))
+            return persist_session(messages, history)
+
+        monkeypatch.setattr(agent, "_persist_session", capture_pre_loop)
         monkeypatch.setattr("hermes_cli.config.load_config_readonly", lambda: {
             "message_timestamps": {"enabled": enabled},
         })
@@ -67,9 +75,12 @@ def test_direct_agent_global_timestamp_reaches_responses_request(tmp_path, monke
         current_wire = "[Thu 2026-08-20 12:00:00 UTC] current question" if enabled else "current question"
         assert captured[0]["input"][0]["content"] == historical_wire
         assert captured[0]["input"][-1]["content"] == current_wire
-        # Rendering is confined to the request: callers retain clean canonical rows
-        # for the next turn and any later persistence/reload lifecycle.
-        assert result["messages"][0]["content"] == "[System note: Your previous turn was interrupted. Continue.] earlier question"
+        # The working history is prepared before the loop; final persistence
+        # applies the separate clean current-user override.
+        assert [message["content"] for message in pre_loop_messages[0] if message["role"] == "user"] == [
+            historical_wire, current_wire,
+        ]
+        assert result["messages"][0]["content"] == historical_wire
         assert result["messages"][-2]["content"] == "current question"
         persisted = db.get_messages_as_conversation("timestamp-direct")
         persisted_user = next(message for message in reversed(persisted) if message["role"] == "user")
@@ -178,12 +189,77 @@ def test_direct_agent_global_timestamp_reaches_chat_completions_request(tmp_path
             "[Thu 2026-08-20 12:00:00 UTC] earlier question",
             "[Thu 2026-08-20 12:00:00 UTC] current question",
         ]
-        assert result["messages"][0]["content"] == "earlier question"
+        assert result["messages"][0]["content"] == "[Thu 2026-08-20 12:00:00 UTC] earlier question"
         assert result["messages"][-2]["content"] == "current question"
         persisted = db.get_messages_as_conversation("timestamp-chat")
         persisted_users = [message for message in persisted if message["role"] == "user"]
         assert [message["content"] for message in persisted_users] == ["current question"]
         assert persisted_users[0]["timestamp"] == STAMP
+    finally:
+        db.close()
+
+
+def test_direct_agent_chat_timestamp_context_survives_tool_continuation(tmp_path, monkeypatch):
+    """Chat Completions retains one pre-loop timestamp across a tool continuation."""
+    from hermes_state import SessionDB
+    from run_agent import AIAgent
+
+    captured = []
+    db = SessionDB(db_path=tmp_path / "state.db")
+    tool_file = tmp_path / "tool.txt"
+    tool_file.write_text("tool fixture", encoding="utf-8")
+    responses = [
+        SimpleNamespace(
+            choices=[SimpleNamespace(
+                message=SimpleNamespace(
+                    content=None,
+                    reasoning_content=None,
+                    reasoning=None,
+                    tool_calls=[SimpleNamespace(
+                        id="call_1", type="function",
+                        function=SimpleNamespace(name="read_file", arguments=json.dumps({"path": str(tool_file)})),
+                    )],
+                ),
+                finish_reason="tool_calls",
+            )],
+            model="test-model", usage=None,
+        ),
+        SimpleNamespace(
+            choices=[SimpleNamespace(
+                message=SimpleNamespace(content="done", reasoning_content=None, reasoning=None, tool_calls=None),
+                finish_reason="stop",
+            )],
+            model="test-model", usage=None,
+        ),
+    ]
+
+    def respond(kwargs):
+        captured.append(deepcopy(kwargs))
+        return responses.pop(0)
+
+    try:
+        agent = AIAgent(
+            api_key="test-key", base_url="http://127.0.0.1:1/v1", provider="openai-compat",
+            model="test-model", api_mode="chat_completions", max_iterations=4,
+            enabled_toolsets=[], quiet_mode=True, skip_context_files=True, skip_memory=True,
+            save_trajectories=False, session_db=db, session_id="timestamp-chat-tool",
+        )
+        agent._cached_system_prompt = "Stable synthetic system prompt."
+        agent._disable_streaming = True
+        agent.valid_tool_names = {"read_file"}
+        monkeypatch.setattr("hermes_cli.config.load_config_readonly", lambda: {"message_timestamps": {"enabled": True}})
+        monkeypatch.setattr("hermes_time.get_timezone", lambda: ZoneInfo("UTC"))
+        monkeypatch.setattr(agent, "_interruptible_api_call", respond)
+
+        result = agent.run_conversation("current question", task_id="timestamp-chat-tool", persist_user_timestamp=STAMP)
+
+        assert result["completed"] is True
+        assert len(captured) == 2
+        first_user = next(message["content"] for message in captured[0]["messages"] if message["role"] == "user")
+        second_user = next(message["content"] for message in captured[1]["messages"] if message["role"] == "user")
+        assert first_user == "[Thu 2026-08-20 12:00:00 UTC] current question"
+        assert second_user == first_user
+        assert second_user.count("[Thu 2026-08-20 12:00:00 UTC]") == 1
     finally:
         db.close()
 
@@ -256,7 +332,7 @@ def test_direct_agent_timestamp_projection_survives_tool_continuation_and_db_reo
         )
         assert cached["completed"] is True
         assert captured[-1]["input"][0]["content"] == "[Thu 2026-08-20 12:00:00 UTC] first question"
-        assert cached["messages"][0]["content"] == "first question"
+        assert cached["messages"][0]["content"] == "[Thu 2026-08-20 12:00:00 UTC] first question"
 
         reopened = SessionDB(db_path=db_path)
         try:
@@ -274,7 +350,7 @@ def test_direct_agent_timestamp_projection_survives_tool_continuation_and_db_reo
         )
         assert resumed["completed"] is True
         assert captured[-1]["input"][0]["content"] == "[Thu 2026-08-20 12:00:00 UTC] first question"
-        assert resumed["messages"][0]["content"] == "first question"
+        assert resumed["messages"][0]["content"] == "[Thu 2026-08-20 12:00:00 UTC] first question"
     finally:
         db.close()
 
@@ -377,7 +453,7 @@ def test_timestamped_history_survives_actual_tool_pruning_persistence_and_restar
         )
         assert resumed["completed"] is True
         assert any(message.get("content") == timestamped_sidecar for message in captured[0]["input"])
-        retained_returned = next(message for message in resumed["messages"] if message.get("content") == "retained question")
+        retained_returned = next(message for message in resumed["messages"] if message.get("content", "").endswith("retained question"))
         assert retained_returned["timestamp"] == STAMP + 30
         assert retained_returned["api_content"] == timestamped_sidecar
     finally:
@@ -489,7 +565,7 @@ def test_timestamped_retained_tail_survives_full_compaction_persistence_and_rest
         assert resumed["completed"] is True
         assert any(message.get("content") == retained_sidecar for message in captured[0]["input"])
         retained_returned = next(
-            message for message in resumed["messages"] if message.get("content") == "retained tail question"
+            message for message in resumed["messages"] if message.get("content", "").endswith("retained tail question")
         )
         assert retained_returned["timestamp"] == STAMP + 30
         assert retained_returned["api_content"] == retained_sidecar
@@ -575,8 +651,11 @@ def test_timestamped_turn_recovers_clean_canonical_history_after_provider_failur
         assert resumed_wire.startswith("[Thu 2026-08-20 12:00:00 UTC] failed question")
         assert resumed_wire.count("failed question") == 1
         assert resumed_wire.count("resume question") == 1
-        # The ordinary alternation repair is retained history policy, not the
-        # timestamp projection; it remains clean and contains each logical ask once.
-        assert recovered["messages"][0]["content"] == "failed question\n\nresume question"
+        # The ordinary alternation repair retains both prepared inputs in the
+        # working message; the stored pre-failure row itself remains clean.
+        assert recovered["messages"][0]["content"] == (
+            "[Thu 2026-08-20 12:00:00 UTC] failed question\n\n"
+            "[Thu 2026-08-20 12:00:30 UTC] resume question"
+        )
     finally:
         reopened.close()

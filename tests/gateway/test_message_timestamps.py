@@ -49,7 +49,7 @@ def test_message_timestamps_enabled_defaults_off():
     )
 
 
-def test_gateway_timestamp_setting_ignores_global_conflicts():
+def test_gateway_timestamp_setting_uses_explicit_gateway_then_global_fallback():
     from gateway.run import _message_timestamps_enabled
 
     assert _message_timestamps_enabled({
@@ -60,6 +60,11 @@ def test_gateway_timestamp_setting_ignores_global_conflicts():
         "message_timestamps": {"enabled": True},
         "gateway": {"message_timestamps": {"enabled": False}},
     }) is False
+    assert _message_timestamps_enabled({"message_timestamps": {"enabled": True}}) is True
+    assert _message_timestamps_enabled({
+        "message_timestamps": {"enabled": True},
+        "gateway": {"message_timestamps": None},
+    }) is True
 
 
 def test_build_history_injects_only_when_enabled():
@@ -80,3 +85,32 @@ def test_build_history_injects_only_when_enabled():
     assert agent_history[0]["content"].endswith("hello")
     # Assistant message is never timestamped.
     assert agent_history[1]["content"] == "hi"
+
+
+def test_gateway_fresh_intake_and_runner_replay_share_global_fallback(monkeypatch):
+    """Raw gateway config reaches fresh intake and TurnRunner replay consistently."""
+    from gateway.run_turn import GatewayTurnMixin
+    from gateway.run_turn_runner import TurnRunner
+    from gateway.turn_context import TurnContext
+
+    timestamp = _epoch(2026, 4, 28, 13, 40, 53)
+    config = {"message_timestamps": {"enabled": True}, "gateway": {"message_timestamps": None}}
+    monkeypatch.setattr("gateway.run._load_gateway_config", lambda: config)
+    monkeypatch.setattr("hermes_time.get_timezone", lambda: BERLIN)
+
+    fresh, persist_message, persist_timestamp = GatewayTurnMixin()._hmwa_apply_message_timestamp(
+        type("Event", (), {"timestamp": timestamp})(), "hello",
+    )
+
+    assert fresh == "[Tue 2026-04-28 13:40:53 CEST] hello"
+    assert persist_message == "hello"
+    assert persist_timestamp == timestamp
+
+    runner = TurnRunner(object(), TurnContext(
+        history=[{"role": "user", "content": "earlier", "timestamp": timestamp}],
+        user_config=config,
+    ))
+    replay, observed, _media_paths = runner._load_turn_history(object(), reused_cached_agent=False)
+
+    assert observed is None
+    assert replay[0]["content"] == "[Tue 2026-04-28 13:40:53 CEST] earlier"

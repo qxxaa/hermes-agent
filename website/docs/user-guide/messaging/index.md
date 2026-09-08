@@ -466,25 +466,28 @@ temporal reasoning ("you asked this morning…", noticing a long gap). It is
 
 ```yaml
 # CLI, native TUI/Dashboard/Desktop/Relay, ACP, API and direct-agent turns.
-# Omit or use null to inherit the legacy gateway setting for these non-gateway paths.
 message_timestamps:
   enabled: true
 
-# Messaging gateway turns use only this setting.
+# Messaging gateway turns prefer this setting when it is explicitly true or false.
 gateway:
   message_timestamps:
     enabled: true
 ```
 
-The top-level setting controls non-gateway agent entrypoints when it is an
-explicit Boolean. Otherwise they fall back to `gateway.message_timestamps.enabled`.
-Messaging gateway turns always use only the nested gateway setting, so a global
-`false` does not disable an enabled bot and a global `true` does not enable a
-disabled bot.
+An explicit Boolean is route-authoritative: gateway turns use
+`gateway.message_timestamps.enabled` first and otherwise fall back to the
+top-level setting; non-gateway turns use the top-level setting first and
+otherwise fall back to the gateway setting. Missing keys and `null` are
+unspecified, and both unspecified settings leave timestamps off. Consequently,
+global `true` with an absent or null gateway setting enables both routes, while
+an explicit gateway `false` still disables gateway turns.
 
 Persisted transcripts always stay clean — the timestamp is stored as message
 metadata regardless of this toggle, so enabling it later also surfaces
 send-times for past messages, and replay never accumulates duplicate prefixes.
+Fresh messages and replay history are prepared before the agent's request loop;
+this does not change later pruning or compaction persistence behaviour.
 
 When enabled, the bot sends status messages as it works:
 

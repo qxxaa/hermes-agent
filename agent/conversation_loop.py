@@ -1269,7 +1269,7 @@ class _LoopState:
     _should_review_memory: Any
     _plugin_user_context: Any
     _ext_prefetch_cache: Any
-    message_timestamp_replay_enabled: Any
+
     # Turn-scoped state (rebound by the phases).
     messages: Any
     active_system_prompt: Any
@@ -1332,7 +1332,6 @@ _CTX_FIELDS = frozenset({
     "user_message", "original_user_message", "conversation_history", "effective_task_id", "turn_id",
     "_should_review_memory", "_plugin_user_context", "_ext_prefetch_cache", "messages",
     "active_system_prompt", "current_turn_user_idx", "_preflight_compression_blocked",
-    "message_timestamp_replay_enabled",
 })
 # Keyword names each phase helper takes (minus ``agent``), cached per function object.
 _PHASE_PARAMS: Dict[Any, tuple] = {}

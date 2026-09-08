@@ -374,7 +374,7 @@ def test_pending_cli_message_uses_clean_override_for_api_local_note():
 
 
 
-def test_non_gateway_timestamps_decorate_model_context_but_persist_clean_text():
+def test_non_gateway_timestamps_prepare_working_context_but_persist_clean_text():
     from datetime import datetime
     from zoneinfo import ZoneInfo
 
@@ -398,11 +398,10 @@ def test_non_gateway_timestamps_decorate_model_context_but_persist_clean_text():
         )
 
     assert history[0]["content"] == "earlier"
-    # Timestamp rendering is a request-only replay projection. The loop's
-    # canonical return/persistence list remains the caller's clean history.
-    assert ctx.messages[0]["content"] == "earlier"
-    assert ctx.messages[-1]["content"] == "now"
-    assert ctx.message_timestamp_replay_enabled is True
+    # Preparation occurs before the request loop. Persistence retains the
+    # separate clean override, matching the gateway intake lifecycle.
+    assert ctx.messages[0]["content"] == "[Tue 2026-04-28 13:42:10 CEST] earlier"
+    assert ctx.messages[-1]["content"] == "[Tue 2026-04-28 13:42:10 CEST] now"
     assert ctx.original_user_message == "now"
     assert agent._persist_user_message_override == "now"
     assert agent._persist_user_message_timestamp == timestamp
@@ -432,7 +431,6 @@ def test_gateway_prepared_turn_defers_to_gateway_configuration(global_enabled, g
         )
 
     assert ctx.messages[-1]["content"] == "gateway-disabled message"
-    assert ctx.message_timestamp_replay_enabled is None
     assert agent._persist_user_message_timestamp == timestamp
 
 

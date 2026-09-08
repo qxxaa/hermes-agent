@@ -64,6 +64,9 @@ async def test_api_server_run_stages_history_through_timestamped_provider_reques
             "[Thu 2026-08-20 12:00:00 UTC] earlier question",
             "[Thu 2026-08-20 12:00:00 UTC] current question",
         ]
+        assert [message["content"] for message in result["messages"] if message["role"] == "user"] == [
+            "[Thu 2026-08-20 12:00:00 UTC] earlier question", "current question",
+        ]
         persisted = db.get_messages_as_conversation("timestamp-api")
         persisted_user = next(message for message in persisted if message["role"] == "user")
         assert persisted_user["content"] == "current question"
