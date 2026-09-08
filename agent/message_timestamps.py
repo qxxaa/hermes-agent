@@ -91,6 +91,13 @@ def strip_leading_message_timestamps(content: str, tz=None) -> Tuple[str, Option
     return text, embedded_epoch
 
 
+def prepare_fresh_user_message(content: str, ts_value: Any = None, tz=None) -> Tuple[str, Optional[float]]:
+    """Apply gateway fresh-intake cleanup and supplied-time precedence."""
+    clean_content, embedded_epoch = strip_leading_message_timestamps(content, tz=tz)
+    supplied_epoch = coerce_message_timestamp(ts_value, tz=tz)
+    return clean_content, supplied_epoch if supplied_epoch is not None else embedded_epoch
+
+
 def render_user_content_with_timestamp(content: str, ts_value: Any = None, tz=None) -> str:
     clean_content, embedded_epoch = strip_leading_message_timestamps(content, tz=tz)
     prefix = format_message_timestamp(ts_value if embedded_epoch is None else embedded_epoch, tz=tz)
@@ -150,6 +157,8 @@ def render_message_timestamp_replay(
         message = dict(source_message)
         content = message.get("content")
         if message.get("role") == "user" and isinstance(content, str) and content:
+            if not isinstance(message.get("api_content"), str) or not message.get("api_content"):
+                message.pop("api_content", None)
             replay_timestamp = message.get("timestamp")
             # Gateway recovery cleanup applies to replayed history. The fresh
             # turn can legitimately contain the same text and must reach the
@@ -170,7 +179,7 @@ def render_message_timestamp_replay(
             if enabled:
                 rendered = render_user_content_with_timestamp(content, replay_timestamp, tz=tz)
                 sidecar = message.get("api_content")
-                if rendered != content and sidecar and not (
+                if rendered != content and isinstance(sidecar, str) and sidecar and not (
                     sidecar == rendered or sidecar.startswith(rendered + "\n\n")
                 ):
                     message.pop("api_content", None)

@@ -144,6 +144,22 @@ def test_history_cleanup_runs_when_timestamp_rendering_is_disabled():
     assert replay == [{"role": "user", "content": "actual question"}]
 
 
+@pytest.mark.parametrize("sidecar", [None, "", {"invalid": True}, ["invalid"], 7])
+def test_replay_drops_ineligible_sidecars_before_timestamp_compatibility(sidecar):
+    """Pinned gateway replay admits only nonempty strings as sidecars."""
+    from agent.message_timestamps import render_message_timestamp_replay
+
+    timestamp = datetime(2026, 8, 20, 12, 0, tzinfo=ZoneInfo("UTC")).timestamp()
+    replay, _ = render_message_timestamp_replay(
+        [{"role": "user", "content": "question", "timestamp": timestamp, "api_content": sidecar}],
+        enabled=True,
+        current_turn_user_idx=1,
+        tz=ZoneInfo("UTC"),
+    )
+
+    assert replay == [{"role": "user", "content": "[Thu 2026-08-20 12:00:00 UTC] question", "timestamp": timestamp}]
+
+
 def test_merged_defaults_leave_global_setting_unset_for_legacy_fallback(tmp_path, monkeypatch):
     from agent.message_timestamps import message_timestamps_enabled
     from hermes_cli.config import load_config_readonly

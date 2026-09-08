@@ -897,18 +897,36 @@ def build_turn_context(
             persist_user_message if persist_user_message is not None else user_message
         )
         try:
-            from agent.message_timestamps import coerce_message_timestamp, message_timestamps_enabled
+            from agent.message_timestamps import (
+                coerce_message_timestamp,
+                message_timestamps_enabled,
+                prepare_fresh_user_message,
+            )
             from hermes_cli.config import load_config_readonly
+            from hermes_time import get_timezone
 
             message_timestamp_replay_enabled = message_timestamps_enabled(load_config_readonly())
-            rendered_timestamp = (
-                coerce_message_timestamp(time.time() if persist_user_timestamp is None else persist_user_timestamp)
-                if message_timestamp_replay_enabled else None
-            )
-            if rendered_timestamp is not None:
-                if persist_user_message is None:
-                    persist_user_message = original_user_message
-                persist_user_timestamp = rendered_timestamp
+            staged_timestamp = None
+            pending_cli_message = getattr(agent, "_pending_cli_user_message", None)
+            if (
+                persist_user_timestamp is None
+                and isinstance(pending_cli_message, dict)
+                and pending_cli_message.get("content") == original_user_message
+            ):
+                staged_timestamp = pending_cli_message.get("timestamp")
+            if isinstance(original_user_message, str):
+                clean_user_message, admission_timestamp = prepare_fresh_user_message(
+                    original_user_message,
+                    persist_user_timestamp if persist_user_timestamp is not None else staged_timestamp,
+                    tz=get_timezone(),
+                )
+                if admission_timestamp is None and message_timestamp_replay_enabled:
+                    admission_timestamp = coerce_message_timestamp(time.time(), tz=get_timezone())
+                if persist_user_message is None or user_message == original_user_message:
+                    user_message = clean_user_message
+                persist_user_message = clean_user_message
+                if admission_timestamp is not None:
+                    persist_user_timestamp = admission_timestamp
         except Exception:
             logger.debug("message timestamp rendering skipped", exc_info=True)
 
