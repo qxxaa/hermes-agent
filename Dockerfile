@@ -49,6 +49,16 @@ FROM ghcr.io/astral-sh/uv:0.11.6-python3.13-trixie@sha256:b3c543b6c4f23a5f2df228
 # 2.41) runtime.  Bumping to a new Node major is a one-line ARG change; see
 # #4977.
 FROM node:26-bookworm-slim@sha256:9e6f9357d371591e32ab6f2d8a26d63bdd0d17c29eee3f4f3e7e454d9634bf73 AS node_source
+
+# Renderer-only build. No Electron download, native packager or startup build.
+FROM node_source AS browser_client_build
+WORKDIR /build
+COPY package.json package-lock.json ./
+COPY apps/shared/ apps/shared/
+COPY apps/desktop/ apps/desktop/
+RUN npm ci --workspace apps/desktop --include-workspace-root --ignore-scripts --no-audit --no-fund && \
+    npm run build:browser --workspace apps/desktop
+
 FROM debian:13.4
 
 # Disable Python stdout buffering to ensure logs are printed immediately.
@@ -284,6 +294,7 @@ RUN cd web && npm run build && \
 # gives the non-root hermes user read + traverse but no write; root retains
 # write so the build steps below don't need chmod u+w dances.
 COPY --link --chmod=a+rX,go-w . .
+COPY --from=browser_client_build --chmod=a+rX,go-w /build/apps/desktop/dist/ /opt/hermes/hermes_cli/browser_dist/
 
 # ---------- Permissions ----------
 # Link hermes-agent itself (editable). Deps are already installed in the

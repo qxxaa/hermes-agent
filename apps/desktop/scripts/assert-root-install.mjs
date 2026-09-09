@@ -42,7 +42,7 @@ import { isMain } from "./utils.mjs"
 // `dependencies` + `devDependencies` — a partial install is refused whichever
 // package it happened to drop. `optionalDependencies` are excluded by design:
 // npm legitimately skips them (platform-gated natives like `get-windows`).
-const BUILD_CRITICAL_PACKAGES = ["vite", "katex", "electron", "electron-builder"]
+const BUILD_CRITICAL_PACKAGES = ["vite", "katex"]
 export { BUILD_CRITICAL_PACKAGES }
 
 // Resolve the way Node's own lookup does — walk `node_modules` upward — rather

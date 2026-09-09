@@ -72,7 +72,7 @@ export function BootFailureOverlay() {
     }
 
     void window.hermesDesktop
-      ?.getRecentLogs()
+      ?.getRecentLogs?.()
       .then(res => setLogs(res.lines ?? []))
       .catch(() => undefined)
   }, [boot.error, visible])
@@ -146,7 +146,7 @@ export function BootFailureOverlay() {
 
   const retry = async () => {
     setBusy('retry')
-    await window.hermesDesktop?.resetBootstrap().catch(() => undefined)
+    await window.hermesDesktop?.resetBootstrap?.().catch(() => undefined)
     window.location.reload()
   }
 
@@ -280,8 +280,12 @@ export function BootFailureOverlay() {
   // progress. When set, the recovery screen leads with the cloud-specific
   // guidance instead of the generic remote-failure copy (#85335).
   const cloudDown = Boolean(boot.isCloudBackendDown)
+  const browserMode = window.hermesDesktop?.browserClient === true
 
-  if (remoteReauth) {
+  if (browserMode) {
+    actions = [retryAction]
+    hint = boot.error || copy.remoteDescription
+  } else if (remoteReauth) {
     actions = [
       {
         key: 'signin',
@@ -402,10 +406,12 @@ export function BootFailureOverlay() {
                   {action.label}
                 </Button>
               ))}
-              <Button onClick={openLogs} variant="ghost">
-                <FileText />
-                {copy.openLogs}
-              </Button>
+              {!browserMode ? (
+                <Button onClick={openLogs} variant="ghost">
+                  <FileText />
+                  {copy.openLogs}
+                </Button>
+              ) : null}
             </div>
             <p className="text-xs text-muted-foreground">{hint}</p>
           </div>

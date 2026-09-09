@@ -19,6 +19,12 @@ case "${HERMES_DASHBOARD:-}" in
         ;;
 esac
 
+# Select only the UI assets. Host, port, authentication and backend ownership
+# remain with this existing service. Missing assets must not trigger a UI build.
+# shellcheck disable=SC1091
+. /opt/hermes/docker/dashboard-ui.sh
+hermes_select_dashboard_ui /opt/hermes || exit $?
+
 # with-contenv repopulates HOME from /init as /root. Reset it before
 # dropping privileges so HOME-anchored state lands under /opt/data.
 export HOME=/opt/data

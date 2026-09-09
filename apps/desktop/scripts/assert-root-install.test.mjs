@@ -28,6 +28,15 @@ function makeTree({ rootPackages = BUILD_CRITICAL, react = '19.2.7', reactDom = 
   return { tempRoot, appDir }
 }
 
+test('browser renderer dependencies do not require Electron', () => {
+  const { tempRoot, appDir } = makeTree({ rootPackages: ['vite', 'katex'] })
+  try {
+    assert.deepEqual(checkRootInstall(appDir, tempRoot), { ok: true })
+  } finally {
+    fs.rmSync(tempRoot, { recursive: true, force: true })
+  }
+})
+
 test('checkRootInstall passes on a complete root install', () => {
   const { tempRoot, appDir } = makeTree()
   try {
@@ -54,9 +63,10 @@ test('checkRootInstall fails when katex is missing but vite is present', () => {
   }
 })
 
-test('checkRootInstall fails when electron is missing', () => {
+test('checkRootInstall still checks Electron when a native manifest declares it', () => {
   const { tempRoot, appDir } = makeTree({
-    rootPackages: BUILD_CRITICAL.filter(name => name !== 'electron')
+    rootPackages: ['vite', 'katex'],
+    manifest: { devDependencies: { electron: '40.10.2' } }
   })
   try {
     const result = checkRootInstall(appDir, tempRoot)
@@ -68,7 +78,10 @@ test('checkRootInstall fails when electron is missing', () => {
 })
 
 test('checkRootInstall reports every missing package at once', () => {
-  const { tempRoot, appDir } = makeTree({ rootPackages: ['vite'] })
+  const { tempRoot, appDir } = makeTree({
+    rootPackages: ['vite'],
+    manifest: { devDependencies: { electron: '40.10.2', 'electron-builder': '26.0.0' } }
+  })
   try {
     const result = checkRootInstall(appDir, tempRoot)
     assert.equal(result.ok, false)

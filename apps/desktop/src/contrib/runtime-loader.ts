@@ -519,7 +519,7 @@ export const discoverRuntimePlugins = scanDiskPlugins
 export function watchRuntimePlugins(): void {
   const desktop = window.hermesDesktop
 
-  if (watching || !desktop) {
+  if (watching || !desktop?.onPreviewFileChanged) {
     return
   }
 
