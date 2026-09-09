@@ -16,7 +16,13 @@ export {}
 
 declare global {
   interface Window {
+    /** Supplied by Hermes when serving either frontend; never persisted by the client. */
+    __HERMES_AUTH_REQUIRED__?: boolean
+    __HERMES_SESSION_TOKEN__?: string
+    __HERMES_BASE_PATH__?: string
     hermesDesktop: {
+      /** The built-in browser adapter has no native runtime repair/window controls. */
+      readonly browserClient?: boolean
       // Resolve a backend connection. Omit `profile` (or pass the primary) for
       // the window's backend; pass a named profile to lazily spawn/reuse that
       // profile's backend from the pool.

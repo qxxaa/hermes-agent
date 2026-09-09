@@ -102,7 +102,7 @@ const emojibaseAssets = () => ({
 })
 
 export default defineConfig(({ command }) => ({
-  base: './',
+  base: '/',
   plugins: [react(), babel({ presets: [compilerPreset()] }), tailwindcss(), emojibaseAssets()],
   css: {
     // Pin an explicit (empty) PostCSS config. Tailwind is handled entirely by

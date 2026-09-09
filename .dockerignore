@@ -70,12 +70,23 @@ runtime/
 
 # ---------- Not needed inside the Docker image ----------
 
-# Desktop app source (Tauri/Electron); never installed in the container.
-# apps/shared is the dashboard↔desktop websocket helper and is linked from
-# web/package.json as a file: workspace dep — keep it in the build context.
-apps/
+# Admit the renderer build inputs and shared transport, not other app workspaces.
+apps/*
 !apps/shared/
 !apps/shared/**
+!apps/desktop/
+!apps/desktop/**
+apps/desktop/**/node_modules/
+apps/desktop/node_modules/
+apps/desktop/dist/
+apps/desktop/build/
+apps/desktop/release/
+apps/desktop/.env
+apps/desktop/.env.*
+apps/desktop/**/.env
+apps/desktop/**/.env.*
+hermes_cli/browser_dist/
+.hermes/
 
 # Test suite — not shipped in production images
 tests/

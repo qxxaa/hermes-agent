@@ -65,6 +65,21 @@ beforeEach(() => {
 afterEach(cleanup)
 
 describe('BootFailureOverlay', () => {
+  it('offers browser reload without native repair, connection editing or filesystem logs', () => {
+    const original = window.hermesDesktop
+    Object.defineProperty(window, 'hermesDesktop', { configurable: true, value: { browserClient: true } })
+
+    try {
+      render(<BootFailureOverlay />)
+      expect(screen.getByRole('button', { name: /retry/i })).toBeTruthy()
+      expect(screen.queryByRole('button', { name: /repair/i })).toBeNull()
+      expect(screen.queryByRole('button', { name: /gateway settings/i })).toBeNull()
+      expect(screen.queryByRole('button', { name: /open logs/i })).toBeNull()
+    } finally {
+      Object.defineProperty(window, 'hermesDesktop', { configurable: true, value: original })
+    }
+  })
+
   it('swaps to the in-place gateway settings view (no route nav) and back', async () => {
     render(<BootFailureOverlay />)
 

@@ -16,6 +16,14 @@
 # Arguments passed to a finish script: $1=run-exit-code, $2=signal-num,
 # $3=service-dir-name, $4=run-pgid. See servicedir(7).
 
+# EX_CONFIG is a static selector/asset error, not a transient backend crash.
+if [ "${1:-}" = 78 ] && [ "${2:-0}" = 0 ]; then
+    case "$(printf '%s' "${HERMES_WEB_CLIENT_ENABLED:-}" | tr '[:upper:]' '[:lower:]')" in
+        ''|0|false|no|off) ;;
+        *) exit 125 ;;
+    esac
+fi
+
 case "${HERMES_DASHBOARD:-}" in
     1|true|TRUE|True|yes|YES|Yes)
         # Dashboard was enabled — let s6-supervise restart on crash by
