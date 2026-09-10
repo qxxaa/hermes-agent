@@ -397,6 +397,10 @@ export async function sendTestNativeNotification(title: string, body: string): P
   }
 
   try {
+    if (bridge.requestNotificationPermission && !(await bridge.requestNotificationPermission())) {
+      return false
+    }
+
     return await bridge.notify({ body, kind: 'turnDone', title })
   } catch {
     return false

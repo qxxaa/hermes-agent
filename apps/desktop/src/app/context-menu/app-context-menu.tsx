@@ -18,10 +18,13 @@ import {
 } from '@/components/ui/dropdown-menu'
 import { type Translations, useI18n } from '@/i18n'
 import { hostPathLabel, hudForcesNativeLinks, normalizeExternalUrl, openExternalLink } from '@/lib/external-link'
+import { hasDesktopMethod, isBrowserClient } from '@/lib/browser-capabilities'
+import { imageFilename } from '@/lib/browser-image-download'
 import { formatCombo } from '@/lib/keybinds/combo'
 import { isRemoteGateway } from '@/lib/media'
 import { reachablePreviewUrl } from '@/lib/preview-reach'
 import { openCommandPalette } from '@/store/command-palette'
+import { notify, notifyError } from '@/store/notifications'
 import { openPreview } from '@/store/preview'
 import { toggleStatusbarVisible } from '@/store/statusbar-prefs'
 import { requestActiveUpdate } from '@/store/updates'
@@ -56,6 +59,20 @@ const EDIT_SHORTCUTS = {
   paste: formatCombo('mod+v'),
   selectAll: formatCombo('mod+a')
 } as const
+
+function saveImageWithFeedback(src: string, t: Translations) {
+  void window.hermesDesktop?.saveImageFromUrl?.(src)
+    .then(saved => {
+      if (saved) {
+        notify({
+          kind: isBrowserClient() ? 'info' : 'success',
+          title: isBrowserClient() ? t.desktop.downloadStarted : t.desktop.imageSaved,
+          message: imageFilename(src)
+        })
+      }
+    })
+    .catch(error => notifyError(error, t.desktop.imageDownloadFailed))
+}
 
 function isLoopbackUrl(url: string): boolean {
   try {
@@ -256,12 +273,14 @@ function domSections(open: Extract<OpenContextMenu, { kind: 'dom' }>, t: Transla
             onSelect={() => openExternalLink(target.imageUrl)}
           />
         ) : null,
-        <Item
-          icon="file-media"
-          key="image-copy"
-          label={copy.image.copyImage}
-          onSelect={() => void window.hermesDesktop?.contextMenuCopyImage?.()}
-        />,
+        hasDesktopMethod('contextMenuCopyImage') ? (
+          <Item
+            icon="file-media"
+            key="image-copy"
+            label={copy.image.copyImage}
+            onSelect={() => void window.hermesDesktop?.contextMenuCopyImage?.()}
+          />
+        ) : null,
         target.imageUrl ? (
           <Item
             icon="copy"
@@ -275,7 +294,7 @@ function domSections(open: Extract<OpenContextMenu, { kind: 'dom' }>, t: Transla
             icon="save"
             key="image-save"
             label={copy.image.saveImageAs}
-            onSelect={() => void window.hermesDesktop?.saveImageFromUrl?.(target.imageUrl)}
+            onSelect={() => saveImageWithFeedback(target.imageUrl, t)}
           />
         ) : null
       ].filter(Boolean)
@@ -451,7 +470,7 @@ function guestSections(open: Extract<OpenContextMenu, { kind: 'guest' }>, t: Tra
             icon="save"
             key="guest-image-save"
             label={copy.image.saveImageAs}
-            onSelect={() => void window.hermesDesktop?.saveImageFromUrl?.(imageUrl)}
+            onSelect={() => saveImageWithFeedback(imageUrl, t)}
           />
         ) : null
       ].filter(Boolean)

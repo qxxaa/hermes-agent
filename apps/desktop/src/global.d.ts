@@ -239,6 +239,8 @@ declare global {
       }
       api: <T>(request: HermesApiRequest) => Promise<T>
       notify: (payload: HermesNotification) => Promise<boolean>
+      /** Browser-only explicit permission request used by Settings → Notifications. */
+      requestNotificationPermission?: () => Promise<boolean>
       requestMicrophoneAccess: () => Promise<boolean>
       /** read_window_below tool: metadata for the OS window directly underneath this one (never pixels). */
       readWindowBelow?: () => Promise<{
@@ -265,7 +267,9 @@ declare global {
        *  at the 512 KiB preview cap). Absent on older shells — callers fall
        *  back to readFileText and must reject a `truncated` result. */
       readPluginSource?: (filePath: string) => Promise<HermesReadFileTextResult>
-      selectPaths: (options?: HermesSelectPathsOptions) => Promise<string[]>
+      selectPaths: (options?: HermesSelectPathsOptions, signal?: AbortSignal) => Promise<string[]>
+      /** Browser-only direct device upload; paths resolve only after the gateway confirms them. */
+      uploadFile?: (file: Blob, filename: string, scope: BrowserOperationScope) => Promise<string>
       /** Native save dialog; returns the chosen path or null on cancel. */
       selectSavePath?: (options?: {
         defaultPath?: string
@@ -1452,6 +1456,14 @@ export interface HermesSelectPathsOptions {
   /** Backend profile that produced defaultPath; Electron uses it for WSL gating. */
   profile?: string
   filters?: Array<{ name: string; extensions: string[] }>
+}
+
+/** Owner captured before a browser picker opens or an upload begins. */
+export interface BrowserOperationScope {
+  connectionId: string
+  draftKey?: string
+  profile: string
+  sessionId?: string
 }
 
 export interface BackendExit {

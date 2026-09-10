@@ -6,6 +6,7 @@ import { registerTerminalContextMenu } from '@/app/right-sidebar/terminal/termin
 import { ContextMenu, ContextMenuTrigger, HERMES_CONTEXT_MENU_TRIGGER_ATTR } from '@/components/ui/context-menu'
 import { Dialog, DialogContent, DialogTitle } from '@/components/ui/dialog'
 import { formatCombo } from '@/lib/keybinds/combo'
+import { $notifications, clearNotifications } from '@/store/notifications'
 import { $previewTabs, closeRightRail } from '@/store/preview'
 import { $connection } from '@/store/session'
 
@@ -23,6 +24,7 @@ const desktopWindow = window as unknown as { hermesDesktop?: Window['hermesDeskt
 
 function installBridge(partial: Partial<Window['hermesDesktop']> = {}) {
   desktopWindow.hermesDesktop = {
+    contextMenuCopyImage: vi.fn().mockResolvedValue(undefined),
     openExternal: vi.fn().mockResolvedValue(undefined),
     writeClipboard: vi.fn().mockResolvedValue(undefined),
     ...partial
@@ -49,6 +51,7 @@ function attach(html: string): HTMLElement {
 afterEach(() => {
   $contextMenu.set(null)
   $connection.set(null)
+  clearNotifications()
   closeRightRail()
   cleanup()
   vi.restoreAllMocks()
@@ -94,6 +97,17 @@ describe('resolveDomTarget', () => {
 })
 
 describe('AppContextMenu', () => {
+  it('hides unavailable native image copying in the browser adapter without removing browser image actions', async () => {
+    installBridge({ browserClient: true, contextMenuCopyImage: undefined })
+    mountMenu()
+    const host = attach('<img src="https://example.com/picture.png">')
+
+    fireEvent.contextMenu(host.querySelector('img')!)
+
+    expect(await screen.findByText('Save image as…')).toBeTruthy()
+    expect(screen.queryByText('Copy image')).toBeNull()
+  })
+
   it('opens the link menu on a chat link right-click', async () => {
     installBridge()
     mountMenu()
@@ -168,6 +182,33 @@ describe('AppContextMenu', () => {
     expect(await screen.findByText('Copy image')).toBeTruthy()
     expect(screen.getByText('Copy image address')).toBeTruthy()
     expect(screen.getByText('Save image as…')).toBeTruthy()
+  })
+
+  it('keeps image-save context actions connected to the bridge', async () => {
+    const saveImageFromUrl = vi.fn().mockResolvedValue(true)
+    installBridge({ saveImageFromUrl })
+    mountMenu()
+    const host = attach('<img src="https://example.com/pic.png" alt="pic">')
+
+    fireEvent.contextMenu(host.querySelector('img')!)
+    fireEvent.click(await screen.findByText('Save image as…'))
+
+    await waitFor(() => expect(saveImageFromUrl).toHaveBeenCalledWith('https://example.com/pic.png'))
+  })
+
+  it('reports a failed main-image download instead of leaving a rejected menu promise', async () => {
+    installBridge({ saveImageFromUrl: vi.fn().mockRejectedValue(new Error('HTML login response')) })
+    mountMenu()
+    const host = attach('<img src="https://example.com/pic.png" alt="pic">')
+
+    fireEvent.contextMenu(host.querySelector('img')!)
+    fireEvent.click(await screen.findByText('Save image as…'))
+
+    await waitFor(() => {
+      expect($notifications.get()).toContainEqual(
+        expect.objectContaining({ kind: 'error', message: 'HTML login response' })
+      )
+    })
   })
 
   it('opens the edit menu in an editable and augments it with spellcheck', async () => {
@@ -616,6 +657,25 @@ describe('AppContextMenu guest (in-app browser)', () => {
 
     expect(await screen.findByText('Copy image')).toBeTruthy()
     expect(screen.getByText('Save image as…')).toBeTruthy()
+  })
+
+  it('reports a failed guest-image download instead of leaving a rejected menu promise', async () => {
+    installBridge({ saveImageFromUrl: vi.fn().mockRejectedValue(new Error('HTML login response')) })
+    mountMenu()
+
+    openGuestContextMenu(
+      10,
+      10,
+      guestParams({ hasImageContents: true, srcURL: 'https://example.com/pic.png' }),
+      guestHandle()
+    )
+    fireEvent.click(await screen.findByText('Save image as…'))
+
+    await waitFor(() => {
+      expect($notifications.get()).toContainEqual(
+        expect.objectContaining({ kind: 'error', message: 'HTML login response' })
+      )
+    })
   })
 
   it('shows spell suggestions immediately for guest editables', async () => {

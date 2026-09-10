@@ -1,5 +1,7 @@
 import { useStore } from '@nanostores/react'
 
+import { hasDesktopCapability } from '@/lib/browser-capabilities'
+
 import { TerminalSlot } from './persistent'
 import { TerminalRail } from './rail'
 import { $terminals } from './terminals'
@@ -12,6 +14,10 @@ import { $terminals } from './terminals'
  *  its close affordance; closing the last one hides the pane (reopen re-creates). */
 export function TerminalPaneChrome() {
   const terminals = useStore($terminals)
+
+  if (!hasDesktopCapability('terminal')) {
+    return null
+  }
 
   return (
     <div className="flex min-h-0 min-w-0 flex-1">

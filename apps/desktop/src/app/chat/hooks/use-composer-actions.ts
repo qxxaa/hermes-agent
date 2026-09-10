@@ -1,4 +1,4 @@
-import { useCallback } from 'react'
+import { useCallback, useEffect, useRef } from 'react'
 
 import { requestComposerFocus, requestComposerInsert, requestComposerInsertRefs } from '@/app/chat/composer/focus'
 import { droppedFileInlineRef } from '@/app/chat/composer/inline-refs'
@@ -302,6 +302,31 @@ export function useComposerActions({
 }: ComposerActionsOptions) {
   const { t } = useI18n()
   const copy = t.desktop
+  const pickerAbortRef = useRef<AbortController | null>(null)
+  const pickerOwnerRef = useRef({ sessionId: activeSessionId, target: scope.target })
+  pickerOwnerRef.current = { sessionId: activeSessionId, target: scope.target }
+
+  useEffect(() => () => pickerAbortRef.current?.abort(), [activeSessionId, scope.target])
+
+  const pickDevicePaths = useCallback(async (options: Parameters<typeof selectDesktopPaths>[0]) => {
+    pickerAbortRef.current?.abort()
+    const controller = new AbortController()
+    const owner = pickerOwnerRef.current
+    pickerAbortRef.current = controller
+
+    try {
+      const paths = await selectDesktopPaths(options, controller.signal)
+      const currentOwner = pickerOwnerRef.current
+
+      return controller.signal.aborted || currentOwner.sessionId !== owner.sessionId || currentOwner.target !== owner.target
+        ? []
+        : paths
+    } finally {
+      if (pickerAbortRef.current === controller) {
+        pickerAbortRef.current = null
+      }
+    }
+  }, [])
 
   /** Add to this scope's composer and focus it. All sidebar/picker/drop
    *  attach paths funnel through here. */
@@ -396,11 +421,19 @@ export function useComposerActions({
 
   const pickContextPaths = useCallback(
     async (kind: 'file' | 'folder') => {
-      const paths = await selectDesktopPaths({
-        title: kind === 'file' ? 'Add files as context' : 'Add folders as context',
-        defaultPath: currentCwd || undefined,
-        directories: kind === 'folder'
-      })
+      let paths: string[]
+
+      try {
+        paths = await pickDevicePaths({
+          title: kind === 'file' ? 'Add files as context' : 'Add folders as context',
+          defaultPath: currentCwd || undefined,
+          directories: kind === 'folder'
+        })
+      } catch (error) {
+        notifyError(error, copy.dropFiles)
+
+        return
+      }
 
       if (!paths?.length) {
         return
@@ -419,7 +452,7 @@ export function useComposerActions({
         })
       }
     },
-    [attachToMain, currentCwd]
+    [attachToMain, copy.dropFiles, currentCwd, pickDevicePaths]
   )
 
   const insertContextPathInlineRef = useCallback(
@@ -538,16 +571,24 @@ export function useComposerActions({
   )
 
   const pickImages = useCallback(async () => {
-    const paths = await selectDesktopPaths({
-      title: copy.attachImages,
-      defaultPath: currentCwd || undefined,
-      filters: [
-        {
-          name: t.composer.images,
-          extensions: ['png', 'jpg', 'jpeg', 'gif', 'webp', 'bmp', 'tiff']
-        }
-      ]
-    })
+    let paths: string[]
+
+    try {
+      paths = await pickDevicePaths({
+        title: copy.attachImages,
+        defaultPath: currentCwd || undefined,
+        filters: [
+          {
+            name: t.composer.images,
+            extensions: ['png', 'jpg', 'jpeg', 'gif', 'webp', 'bmp', 'tiff']
+          }
+        ]
+      })
+    } catch (error) {
+      notifyError(error, copy.imageAttachFailed)
+
+      return
+    }
 
     if (!paths?.length) {
       return
@@ -556,7 +597,7 @@ export function useComposerActions({
     for (const path of paths) {
       await attachImagePath(path)
     }
-  }, [attachImagePath, copy.attachImages, currentCwd, t.composer.images])
+  }, [attachImagePath, copy.attachImages, copy.imageAttachFailed, currentCwd, pickDevicePaths, t.composer.images])
 
   const pasteClipboardImage = useCallback(
     async ({ silent = false }: { silent?: boolean } = {}) => {

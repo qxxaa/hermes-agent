@@ -13,6 +13,7 @@ import { $paneVisible, togglePaneVisible } from '@/components/pane-shell/tree/st
 import { Codicon } from '@/components/ui/codicon'
 import { GlyphSpinner } from '@/components/ui/glyph-spinner'
 import { useI18n } from '@/i18n'
+import { hasDesktopCapability } from '@/lib/browser-capabilities'
 import { displayPath, pathLeaf } from '@/lib/display-path'
 import {
   Activity,
@@ -615,7 +616,7 @@ export function useStatusbarItems({
       {
         actionId: 'view.showTerminal',
         className: `w-7 justify-center px-0${terminalShowing ? ' bg-accent/55 text-foreground' : ''}`,
-        hidden: !chatOpen,
+        hidden: !chatOpen || !hasDesktopCapability('terminal'),
         icon: <Terminal className="size-3.5" />,
         id: 'terminal',
         onSelect: () => togglePaneVisible('terminal'),

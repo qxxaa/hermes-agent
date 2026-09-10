@@ -122,6 +122,22 @@ describe('terminal store persistence', () => {
     expect($terminals.get().find(term => term.id === agentId)?.restoreCwd).toBeUndefined()
     expect($terminals.get().find(term => term.id === userId)?.restoreCwd).toBeUndefined()
   })
+
+  it('does not create an agent terminal or reveal its pane without terminal capability', async () => {
+    const previousDesktop = window.hermesDesktop
+    window.hermesDesktop = { browserClient: true } as Window['hermesDesktop']
+
+    try {
+      const { $activeTerminalId, $terminals, openAgentTerminal } = await loadTerminalStore()
+
+      openAgentTerminal('proc-1', 'background task')
+
+      expect($terminals.get()).toEqual([])
+      expect($activeTerminalId.get()).toBeNull()
+    } finally {
+      window.hermesDesktop = previousDesktop
+    }
+  })
 })
 
 describe('session cwd → terminal tab linking', () => {

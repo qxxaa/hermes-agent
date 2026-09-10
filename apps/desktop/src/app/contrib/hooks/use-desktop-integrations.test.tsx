@@ -6,6 +6,7 @@ import { _resetLegacyDiscardForTests } from '@/store/session'
 import type * as WindowsStore from '@/store/windows'
 import type { SessionInfo } from '@/types/hermes'
 
+import { installBrowserBridge } from '@/bridge/browser-bridge'
 import { makeSessionInfo } from '../../../test/session-info'
 
 import { useDesktopIntegrations } from './use-desktop-integrations'
@@ -18,6 +19,8 @@ const { hudWindowMock } = vi.hoisted(() => ({ hudWindowMock: vi.fn(() => false) 
 vi.mock('@/store/mcp-deeplink-install', () => ({
   requestMcpInstallFromDeepLink: vi.fn()
 }))
+
+vi.mock('@/app/open-session', () => ({ openSession: vi.fn() }))
 
 vi.mock('@/store/windows', async importOriginal => {
   const actual = await importOriginal<typeof WindowsStore>()
@@ -516,6 +519,30 @@ describe('useDesktopIntegrations', () => {
   })
 
   describe('notification activate + plugin deep links', () => {
+    it('routes a browser notification body click through the session and activation consumers', async () => {
+      const notification = vi.fn()
+      vi.stubGlobal('Notification', Object.assign(notification, { permission: 'granted' }))
+      vi.spyOn(window, 'focus').mockImplementation(() => {})
+      delete desktopWindow.hermesDesktop
+      installBrowserBridge()
+      const runtimeIdByStoredSessionId = { current: new Map([['stored-origin', 'runtime-origin']]) }
+      renderHook(() => useDesktopIntegrations({
+        activeProfile: 'default', chatOpen: false, hasPreview: false, locationPathname: '/', navigate,
+        profileReady: true, refreshSessions: vi.fn(), resumeExhaustedSessionId: null, resumeLastSession: true,
+        routedSessionId: null, runtimeIdByStoredSessionId, sessions: []
+      }))
+
+      await window.hermesDesktop.notify({
+        activate: '/index-network/intent/1', kind: 'plugin', notifyId: 'browser-notice', sessionId: 'runtime-origin', title: 'Hermes'
+      })
+      const instance = notification.mock.instances[0] as Notification
+      instance.onclick?.(new Event('click'))
+
+      const { openSession } = await import('@/app/open-session')
+      expect(openSession).toHaveBeenCalledWith('stored-origin', navigate, 'stack')
+      expect(navigate).toHaveBeenCalledWith('/index-network/intent/1')
+    })
+
     it('navigates when a plugin notification activate payload arrives', () => {
       let activate: ((payload: { activate?: string }) => void) | undefined
       desktopWindow.hermesDesktop = {

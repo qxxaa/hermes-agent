@@ -3,7 +3,13 @@
 // document loses focus (e.g. clicking a portaled Radix dropdown). The IPC
 // path runs in the main process and is unconditional.
 
+import { isBrowserClient } from './browser-capabilities'
+
 export function installClipboardShim() {
+  if (isBrowserClient()) {
+    return
+  }
+
   const ipc = window.hermesDesktop?.writeClipboard
 
   if (!ipc || !navigator.clipboard) {
