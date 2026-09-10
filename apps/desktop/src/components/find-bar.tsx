@@ -6,6 +6,7 @@ import { appViewForPath, isOverlayView } from '@/app/routes'
 import { Tip } from '@/components/ui/tooltip'
 import { useI18n } from '@/i18n'
 import { findBarKeyAction, formatMatchLabel } from '@/lib/find-in-page'
+import { isBrowserClient } from '@/lib/browser-capabilities'
 import { cn } from '@/lib/utils'
 import {
   $findInPage,
@@ -149,12 +150,12 @@ export function FindBar() {
   // the store, so a remount (connection re-home) can't stack listeners; the
   // subscription is deliberately mount-scoped and NOT tied to `active` —
   // results for an in-flight search must still land if the bar just closed.
-  useEffect(() => initFindInPageListener(), [])
+  useEffect(() => (isBrowserClient() ? undefined : initFindInPageListener()), [])
 
   // Mirror the find-results listener for the main-process Ctrl/Cmd+F
   // forward — on Pop!_OS / GNOME the GTK compositor grabs the chord at
   // the windowing layer (#81727).
-  useEffect(() => initOpenFindBarListener(), [])
+  useEffect(() => (isBrowserClient() ? undefined : initOpenFindBarListener()), [])
 
   // Debounce search — fire findInPage 200ms after the user stops typing.
   useEffect(() => {

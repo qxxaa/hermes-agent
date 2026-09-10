@@ -3,6 +3,7 @@ import { MemoryRouter, useNavigate } from 'react-router'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { type KeybindRuntimeDeps, useKeybinds } from '@/app/hooks/use-keybinds'
+import { $terminals } from '@/app/right-sidebar/terminal/terminals'
 import { FindBar } from '@/components/find-bar'
 import { I18nProvider } from '@/i18n'
 import { en } from '@/i18n/en'
@@ -44,7 +45,7 @@ interface FoundResult {
   count: number
 }
 
-function installBridge() {
+function installBridge(partial: Partial<Window['hermesDesktop']> = {}) {
   const findInPage = vi.fn().mockResolvedValue({ count: 0 })
   const stopFindInPage = vi.fn().mockResolvedValue(undefined)
   const subscribers = new Set<(result: FoundResult) => void>()
@@ -58,7 +59,8 @@ function installBridge() {
   ;(window as unknown as { hermesDesktop: unknown }).hermesDesktop = {
     findInPage,
     stopFindInPage,
-    onFoundInPage
+    onFoundInPage,
+    ...partial
   }
 
   return {
@@ -857,6 +859,20 @@ describe('FindBar', () => {
     expect(findInPageListenerCount()).toBe(0)
   })
 
+  it('keeps browser find and its mod+f shortcut renderer-owned without subscribing to Electron events', () => {
+    Object.defineProperty(window.hermesDesktop, 'browserClient', { configurable: true, value: true })
+    const surface = plantSurface()
+    surface.textContent = 'browser needle'
+    renderFindBar()
+
+    expect(bridge.onFoundInPage).not.toHaveBeenCalled()
+    openFindBar()
+    setFindQuery('needle')
+
+    expect($findInPage.get().active).toBe(true)
+    expect(surface.querySelectorAll('mark.find-hit')).toHaveLength(1)
+  })
+
   it('a remount does not stack subscriptions', () => {
     const first = renderFindBar()
     first.unmount()
@@ -979,6 +995,18 @@ describe('view.findInPage keybind gate', () => {
 
     fireEvent.keyDown(window, { key: 'f', metaKey: true })
 
+    expect($findInPage.get().active).toBe(true)
+  })
+
+  it('keeps browser FindBar available while terminal keybinds do nothing without a terminal bridge', () => {
+    installBridge({ browserClient: true, terminal: undefined })
+    $terminals.set([])
+    renderKeybinds('/session/a')
+
+    fireEvent.keyDown(window, { code: 'Backquote', ctrlKey: true, key: '`', shiftKey: true })
+    fireEvent.keyDown(window, { key: 'f', metaKey: true })
+
+    expect($terminals.get()).toEqual([])
     expect($findInPage.get().active).toBe(true)
   })
 })

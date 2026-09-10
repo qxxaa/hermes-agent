@@ -9,7 +9,7 @@ import { type StatusbarItem } from '@/app/shell/statusbar-controls'
 import { InlinePreviewDirective } from '@/components/assistant-ui/inline-preview-directive'
 import { IdleMount } from '@/components/idle-mount'
 import { $layoutEditMode, toggleLayoutEditMode } from '@/components/pane-shell/edit-mode'
-import { allPaneIds, group, groupLeafIds, split } from '@/components/pane-shell/tree/model'
+import { allPaneIds, group, groupLeafIds, removePane, split } from '@/components/pane-shell/tree/model'
 import { LayoutTreeRoot } from '@/components/pane-shell/tree/renderer'
 import {
   $layoutTree,
@@ -42,6 +42,7 @@ import { useContributions } from '@/contrib/react/use-contributions'
 import { registry } from '@/contrib/registry'
 import { discoverRuntimePlugins } from '@/contrib/runtime-loader'
 import { translateNow } from '@/i18n'
+import { hasDesktopCapability } from '@/lib/browser-capabilities'
 import { NEW_SESSION_TITLE, sessionTitle as storedSessionTitle } from '@/lib/chat-runtime'
 import { Download, FileText, LayoutDashboard, PanelBottom, PanelTop, Terminal, Upload, Zap } from '@/lib/icons'
 import { type KeybindContribution, KEYBINDS_AREA } from '@/lib/keybinds/actions'
@@ -155,6 +156,8 @@ const workspaceTabDrag = (event: ReactPointerEvent<HTMLElement>, onTap: () => vo
   return true
 }
 
+const terminalAvailable = hasDesktopCapability('terminal')
+
 registry.registerMany([
   {
     id: 'sessions',
@@ -211,6 +214,7 @@ registry.registerMany([
       revealOnPreset: true,
       lifecycleKeepAlive: true
     },
+    when: () => terminalAvailable,
     render: () => <WiredPane part="terminal" />
   },
   {
@@ -435,14 +439,19 @@ const QUAD_TREE = split(
   [3, 1]
 )
 
+const withoutTerminal = (tree: typeof DEFAULT_TREE) => removePane(tree, 'terminal') ?? tree
+const activeDefaultTree = terminalAvailable ? DEFAULT_TREE : withoutTerminal(DEFAULT_TREE)
+const activeFocusTree = terminalAvailable ? FOCUS_TREE : withoutTerminal(FOCUS_TREE)
+const activeQuadTree = terminalAvailable ? QUAD_TREE : withoutTerminal(QUAD_TREE)
+
 registry.registerMany([
-  { id: 'default', area: 'layouts', title: 'Default', order: 0, data: DEFAULT_TREE },
-  { id: 'focus', area: 'layouts', title: 'Focus', order: 10, data: FOCUS_TREE },
-  { id: 'terminal-deck', area: 'layouts', title: 'Terminal deck', order: 20, data: TERMINAL_TREE },
-  { id: 'quad', area: 'layouts', title: 'Quad', order: 30, data: QUAD_TREE }
+  { id: 'default', area: 'layouts', title: 'Default', order: 0, data: activeDefaultTree },
+  { id: 'focus', area: 'layouts', title: 'Focus', order: 10, data: activeFocusTree },
+  ...(terminalAvailable ? [{ id: 'terminal-deck', area: 'layouts', title: 'Terminal deck', order: 20, data: TERMINAL_TREE }] : []),
+  { id: 'quad', area: 'layouts', title: 'Quad', order: 30, data: activeQuadTree }
 ])
 
-declareDefaultTree(DEFAULT_TREE)
+declareDefaultTree(activeDefaultTree)
 
 // Bundled plugins load AFTER core, so a same-id contribution from a plugin
 // deliberately overrides the core default (last writer wins). Third-party
@@ -620,27 +629,32 @@ bindPaneVisibility(
 )
 // ⌃` / statusbar toggle — the terminal COLLAPSES to a rail (tab stays), not
 // hides; PTYs stay alive while collapsed (see PersistentTerminal).
-bindToolPaneCollapse(
-  'terminal',
-  $terminalTakeover,
-  () => setTerminalTakeover(false),
-  () => setTerminalTakeover(true)
-)
+if (terminalAvailable) {
+  bindToolPaneCollapse(
+    'terminal',
+    $terminalTakeover,
+    () => setTerminalTakeover(false),
+    () => setTerminalTakeover(true)
+  )
+}
 // ⌘K door onto the same pane the keybind and statusbar pill flip — was a
 // one-way "open" row under Go to, so it never showed on/off and couldn't hide.
 // Reads the TREE like every other pane toggle: `$terminalTakeover` stays true
 // behind a stacked sibling tab or a minimized zone, which would light the row
 // "on" for a terminal that isn't on screen.
 registry.register(
-  paletteToggle({
-    id: 'view.showTerminal',
-    label: 'Toggle terminal',
-    action: 'view.showTerminal',
-    icon: Terminal,
-    keywords: ['terminal', 'shell', 'console', 'pty'],
-    get: () => isPaneVisible('terminal'),
-    set: () => togglePaneVisible('terminal')
-  })
+  {
+    ...paletteToggle({
+      id: 'view.showTerminal',
+      label: 'Toggle terminal',
+      action: 'view.showTerminal',
+      icon: Terminal,
+      keywords: ['terminal', 'shell', 'console', 'pty'],
+      get: () => isPaneVisible('terminal'),
+      set: () => togglePaneVisible('terminal')
+    }),
+    when: () => terminalAvailable
+  }
 )
 
 // Logs are ⌘K-ONLY chrome: the pane contribution EXISTS only while $logsOpen

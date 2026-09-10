@@ -7,6 +7,7 @@ import { Codicon } from '@/components/ui/codicon'
 import { GlyphSpinner } from '@/components/ui/glyph-spinner'
 import { Tip } from '@/components/ui/tooltip'
 import { type Translations, useI18n } from '@/i18n'
+import { hasDesktopCapability } from '@/lib/browser-capabilities'
 import { capitalize } from '@/lib/text'
 import type { TodoStatus } from '@/lib/todos'
 import { cn } from '@/lib/utils'
@@ -109,7 +110,11 @@ export const StatusItemRow = memo(function StatusItemRow({ item, onDismiss, onOp
 
   // Background rows link to their read-only terminal tab; subagents open their session.
   const onActivate =
-    item.type === 'background' ? () => openAgentTerminal(item.id, item.title) : canOpen ? onOpen : undefined
+    item.type === 'background' && hasDesktopCapability('terminal')
+      ? () => openAgentTerminal(item.id, item.title)
+      : canOpen
+        ? onOpen
+        : undefined
 
   return (
     <Fragment>

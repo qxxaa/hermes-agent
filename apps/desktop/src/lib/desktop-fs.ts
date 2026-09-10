@@ -5,6 +5,7 @@ import type {
   HermesReadFileTextResult,
   HermesSelectPathsOptions
 } from '@/global'
+import { isBrowserClient } from '@/lib/browser-capabilities'
 import { $connection } from '@/store/session'
 
 export interface DesktopFsRemotePicker {
@@ -207,17 +208,21 @@ export async function desktopFileDiff(repoRoot: string, filePath: string): Promi
   return git?.fileDiff ? git.fileDiff(repoRoot, filePath) : ''
 }
 
-export async function selectDesktopPaths(options?: HermesSelectPathsOptions): Promise<string[]> {
+export async function selectDesktopPaths(options?: HermesSelectPathsOptions, browserSignal?: AbortSignal): Promise<string[]> {
   const desktop = bridge()
   const profile = desktopFsProfile()
   const localOptions = profile ? { ...options, profile } : options
 
+  const selectDevicePaths = () => isBrowserClient()
+    ? desktop.selectPaths(localOptions, browserSignal)
+    : desktop.selectPaths(localOptions)
+
   if (!isDesktopFsRemoteMode()) {
-    return desktop.selectPaths(localOptions)
+    return selectDevicePaths()
   }
 
   if (!options?.directories) {
-    return desktop.selectPaths(localOptions)
+    return selectDevicePaths()
   }
 
   return remotePicker ? remotePicker.selectPaths({ ...options, multiple: false }) : []

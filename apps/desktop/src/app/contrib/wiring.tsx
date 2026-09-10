@@ -37,6 +37,7 @@ import { emitGatewayEvent } from '@/contrib/events'
 import { getLatestSessionMessages } from '@/hermes'
 import { type ChatMessage, chatMessageText, preserveLocalAssistantErrors, toChatMessages } from '@/lib/chat-messages'
 import { isMessagingSource } from '@/lib/session-source'
+import { hasDesktopCapability } from '@/lib/browser-capabilities'
 import { latestSessionTodos } from '@/lib/todos'
 import { activateWakeIndicator } from '@/lib/wake-indicator'
 import { playWakeSound } from '@/lib/wake-sound'
@@ -1325,7 +1326,7 @@ export function ContribWiring({ children }: { children: ReactNode }) {
 
       {/* Single persistent xterm host chasing the terminal pane's slot rect.
           The HUD has no terminal pane, so it has nothing to chase. */}
-      {!isHudWindow() && !isBrowserWindow() && (
+      {hasDesktopCapability('terminal') && !isHudWindow() && !isBrowserWindow() && (
         <PersistentTerminal onAddSelectionToChat={composer.addTerminalSelectionAttachment} />
       )}
     </ContribWiringContext.Provider>

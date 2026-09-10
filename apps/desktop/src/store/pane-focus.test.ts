@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { revealDesktopPane } from './pane-focus'
 
@@ -16,7 +16,16 @@ vi.mock('./layout', () => ({ setFileBrowserOpen, setSidebarOpen }))
 vi.mock('./review', () => ({ openReview }))
 
 describe('revealDesktopPane', () => {
-  beforeEach(() => vi.clearAllMocks())
+  const initialDesktop = window.hermesDesktop
+
+  beforeEach(() => {
+    vi.clearAllMocks()
+    window.hermesDesktop = { terminal: {} } as Window['hermesDesktop']
+  })
+
+  afterEach(() => {
+    window.hermesDesktop = initialDesktop
+  })
 
   it("drives each pane's own reveal path", () => {
     revealDesktopPane('chat')
@@ -38,5 +47,12 @@ describe('revealDesktopPane', () => {
 
   it('returns true for a known pane', () => {
     expect(revealDesktopPane('terminal')).toBe(true)
+  })
+
+  it('returns false and leaves terminal state untouched without terminal capability', () => {
+    window.hermesDesktop = { browserClient: true } as Window['hermesDesktop']
+
+    expect(revealDesktopPane('terminal')).toBe(false)
+    expect(setTerminalTakeover).not.toHaveBeenCalled()
   })
 })

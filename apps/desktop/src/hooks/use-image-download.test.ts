@@ -1,6 +1,26 @@
-import { describe, expect, it } from 'vitest'
+import { act, renderHook } from '@testing-library/react'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 
-import { downloadFilename, imageFilename } from './use-image-download'
+import { downloadFilename, imageFilename } from '../lib/browser-image-download'
+import { useImageDownload } from './use-image-download'
+
+const notify = vi.hoisted(() => vi.fn())
+
+vi.mock('@/i18n', () => ({
+  useI18n: () => ({
+    t: { desktop: {
+      downloadStarted: 'Download started', imageDownloadFailed: 'Image download failed', imageSaved: 'Image saved',
+      restartToSaveImages: 'Restart to save images', restartToUseSaveImage: 'Restart to use Save Image.'
+    } }
+  })
+}))
+
+vi.mock('@/store/notifications', () => ({ notify, notifyError: vi.fn() }))
+
+afterEach(() => {
+  delete (window as Partial<Window>).hermesDesktop
+  vi.restoreAllMocks()
+})
 
 describe('imageFilename', () => {
   it('takes the last path segment of a URL', () => {
@@ -36,5 +56,21 @@ describe('downloadFilename', () => {
     // A name like "photo.v2" has an extname but not a known image one — the
     // MIME extension still gets appended so the OS can open the file.
     expect(downloadFilename('https://cdn.example.com/photo.v2', 'image/png')).toBe('photo.v2.png')
+  })
+})
+
+describe('useImageDownload', () => {
+  it('reports browser download initiation rather than a completed file save', async () => {
+    const saveImageFromUrl = vi.fn().mockResolvedValue(true)
+    ;(window as Partial<Window>).hermesDesktop = {
+      browserClient: true,
+      saveImageFromUrl
+    } as unknown as Window['hermesDesktop']
+    const { result } = renderHook(() => useImageDownload('https://example.com/image.png'))
+
+    await act(async () => result.current.download())
+
+    expect(saveImageFromUrl).toHaveBeenCalledWith('https://example.com/image.png')
+    expect(notify).toHaveBeenCalledWith({ kind: 'info', message: 'image.png', title: 'Download started' })
   })
 })

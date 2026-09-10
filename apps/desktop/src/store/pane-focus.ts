@@ -1,5 +1,6 @@
 import { setTerminalTakeover } from '@/app/right-sidebar/store'
 import { isLayoutNode, type LayoutNode } from '@/components/pane-shell/tree/model'
+import { hasDesktopCapability } from '@/lib/browser-capabilities'
 import { applyLayoutPreset, LAYOUTS_AREA } from '@/components/pane-shell/tree/presets'
 import { revealTreePane } from '@/components/pane-shell/tree/store'
 import { registry } from '@/contrib/registry'
@@ -21,6 +22,10 @@ const PANE_REVEALERS: Record<string, () => void> = {
 
 /** Reveal a desktop pane by name. Returns false for an unknown pane. */
 export function revealDesktopPane(pane: string): boolean {
+  if (pane === 'terminal' && !hasDesktopCapability('terminal')) {
+    return false
+  }
+
   const reveal = PANE_REVEALERS[pane]
 
   if (!reveal) {

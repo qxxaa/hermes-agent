@@ -248,6 +248,45 @@ describe('attachmentPreviewDataUrl', () => {
   })
 })
 
+describe('useComposerActions browser picker lifecycle', () => {
+  afterEach(() => {
+    delete (window as unknown as { hermesDesktop?: unknown }).hermesDesktop
+    $connection.set(null)
+    vi.clearAllMocks()
+  })
+
+  it('aborts a live browser picker on unmount without attaching its late selection', async () => {
+    const selectPaths = vi.fn((_options?: unknown, signal?: AbortSignal) => new Promise<string[]>(resolve => {
+      signal?.addEventListener('abort', () => resolve([]), { once: true })
+    }))
+    const add = vi.fn()
+    ;(window as unknown as { hermesDesktop: unknown }).hermesDesktop = { browserClient: true, selectPaths }
+    $connection.set({ mode: 'remote', profile: 'research' } as never)
+    const { result, unmount } = renderHook(() => useComposerActions({
+      activeSessionId: 'origin-session', currentCwd: '/project', requestGateway: vi.fn(),
+      scope: {
+        add,
+        remove: vi.fn(() => null),
+        target: 'origin-composer',
+        update: vi.fn(() => true),
+        updateIfCurrent: vi.fn(() => true)
+      }
+    }))
+
+    act(() => {
+      void result.current.pickImages()
+    })
+    await waitFor(() => expect(selectPaths).toHaveBeenCalledOnce())
+    const signal = selectPaths.mock.calls[0]?.[1]
+
+    expect(signal).toBeInstanceOf(AbortSignal)
+    expect(signal?.aborted).toBe(false)
+    unmount()
+    expect(signal?.aborted).toBe(true)
+    expect(add).not.toHaveBeenCalled()
+  })
+})
+
 describe('useComposerActions native image drops', () => {
   afterEach(() => {
     Reflect.deleteProperty(window, 'hermesDesktop')

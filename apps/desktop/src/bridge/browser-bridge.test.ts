@@ -1,5 +1,8 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
+import { writeClipboardText } from '@/components/ui/copy-button'
+import { installClipboardShim } from '@/lib/clipboard'
+
 // Discovery lets this same contract run on the baseline with no browser adapter.
 // The observable failure is that the browser has no connection capability.
 const adapters = import.meta.glob<{ installBrowserBridge: () => void }>('./browser-bridge.ts')
@@ -144,6 +147,286 @@ describe('integrated browser adapter', () => {
     await expect(window.hermesDesktop.api({ path: '/api/config' })).rejects.toMatchObject({ statusCode: 403 })
     vi.mocked(fetch).mockResolvedValueOnce(new Response('<!doctype html><html></html>'))
     await expect(window.hermesDesktop.api({ path: '/api/config' })).rejects.toThrow('Expected JSON')
+  })
+
+  it('reads gateway files through the authenticated same-origin filesystem endpoints', async () => {
+    vi.mocked(fetch).mockImplementation(async input => {
+      const path = new URL(String(input)).pathname
+
+      if (path === '/api/fs/list') {
+        return jsonResponse({ entries: [{ isDirectory: true, name: 'project', path: '/gateway/project' }] })
+      }
+
+      if (path === '/api/fs/read-text') {
+        return jsonResponse({ byteSize: 5, path: '/gateway/project/note.txt', text: 'hello' })
+      }
+
+      return jsonResponse({ dataUrl: 'data:text/plain;base64,aGVsbG8=' })
+    })
+
+    await expect(window.hermesDesktop.readDir('/gateway')).resolves.toMatchObject({
+      entries: [{ path: '/gateway/project' }]
+    })
+    await expect(window.hermesDesktop.readFileText('/gateway/project/note.txt')).resolves.toMatchObject({ text: 'hello' })
+    await expect(window.hermesDesktop.readFileDataUrl('/gateway/project/note.txt')).resolves.toBe('data:text/plain;base64,aGVsbG8=')
+    expect(vi.mocked(fetch).mock.calls.map(([input]) => new URL(String(input)).pathname)).toEqual([
+      '/api/fs/list', '/api/fs/read-text', '/api/fs/read-data-url'
+    ])
+  })
+
+  it('attaches a configured device picker, uploads selected files under its captured profile, and removes it', async () => {
+    vi.mocked(fetch).mockImplementation(async input => {
+      const path = new URL(String(input)).pathname
+
+      if (path === '/api/files') {
+        return jsonResponse({ can_change_path: true, root: '/managed' })
+      }
+
+      return jsonResponse({ path: '/managed/uploads/browser/research/batch/notes.txt' })
+    })
+    const result = window.hermesDesktop.selectPaths({
+      filters: [{ extensions: ['txt', 'md'], name: 'Notes' }],
+      multiple: true,
+      profile: 'research'
+    })
+    const input = document.querySelector<HTMLInputElement>('input[type="file"]')
+
+    expect(input).not.toBeNull()
+    expect(input?.accept).toBe('.txt,.md')
+    expect(input?.multiple).toBe(true)
+    Object.defineProperty(input!, 'files', {
+      configurable: true,
+      value: [new File(['contents'], 'notes.txt', { type: 'text/plain' })]
+    })
+    input!.dispatchEvent(new Event('change'))
+
+    await expect(result).resolves.toEqual(['/managed/uploads/browser/research/batch/notes.txt'])
+    expect(document.querySelector('input[type="file"]')).toBeNull()
+    expect(vi.mocked(fetch).mock.calls.map(([input]) => new URL(String(input)).pathname)).toEqual([
+      '/api/files', '/api/files/upload-stream'
+    ])
+  })
+
+  it('uploads picker files beneath the server-provided default when managed files are not root-locked', async () => {
+    vi.mocked(fetch).mockImplementation(async input => {
+      if (new URL(String(input)).pathname === '/api/files') {
+        return jsonResponse({ can_change_path: true, path: '/managed-user-home', root: null })
+      }
+
+      return jsonResponse({ path: '/managed-user-home/uploads/browser/research/batch/notes.txt' })
+    })
+    const result = window.hermesDesktop.selectPaths({ profile: 'research' })
+    const input = document.querySelector<HTMLInputElement>('input[type="file"]')!
+
+    Object.defineProperty(input, 'files', {
+      configurable: true,
+      value: [new File(['contents'], 'notes.txt', { type: 'text/plain' })]
+    })
+    input.dispatchEvent(new Event('change'))
+
+    await expect(result).resolves.toEqual(['/managed-user-home/uploads/browser/research/batch/notes.txt'])
+  })
+
+  it('settles a browser picker as cancellation when its live owner aborts before a selected upload finishes', async () => {
+    let resolveUpload!: (value: Response) => void
+    vi.mocked(fetch).mockImplementation(async input => {
+      if (new URL(String(input)).pathname === '/api/files') {
+        return jsonResponse({ root: '/managed' })
+      }
+
+      return new Promise<Response>(resolve => { resolveUpload = resolve })
+    })
+    const controller = new AbortController()
+    const selectPaths = window.hermesDesktop.selectPaths as (
+      options?: Parameters<Window['hermesDesktop']['selectPaths']>[0],
+      signal?: AbortSignal
+    ) => Promise<string[]>
+    const result = selectPaths({ profile: 'research' }, controller.signal)
+    const input = document.querySelector<HTMLInputElement>('input[type="file"]')!
+
+    Object.defineProperty(input, 'files', {
+      configurable: true,
+      value: [new File(['contents'], 'notes.txt', { type: 'text/plain' })]
+    })
+    input.dispatchEvent(new Event('change'))
+    controller.abort()
+
+    await expect(result).resolves.toEqual([])
+    expect(document.querySelector('input[type="file"]')).toBeNull()
+    resolveUpload(jsonResponse({ path: '/managed/uploads/browser/research/late/notes.txt' }))
+    await Promise.resolve()
+  })
+
+  it('reports denied clipboard and microphone access without pretending either operation succeeded', async () => {
+    Object.assign(navigator, {
+      clipboard: {
+        readText: vi.fn().mockRejectedValue(new DOMException('denied', 'NotAllowedError')),
+        writeText: vi.fn().mockRejectedValue(new DOMException('denied', 'NotAllowedError'))
+      },
+      mediaDevices: { getUserMedia: vi.fn().mockRejectedValue(new DOMException('denied', 'NotAllowedError')) }
+    })
+
+    await expect(window.hermesDesktop.writeClipboard('secret')).resolves.toBe(false)
+    await expect(window.hermesDesktop.readClipboard()).rejects.toMatchObject({ name: 'NotAllowedError' })
+    await expect(window.hermesDesktop.requestMicrophoneAccess()).resolves.toBe(false)
+  })
+
+  it('composes the browser bridge, clipboard shim, and copy helper without recursive writes', async () => {
+    const nativeWrite = vi.fn().mockResolvedValue(undefined)
+    Object.assign(navigator, { clipboard: { writeText: nativeWrite } })
+
+    installClipboardShim()
+    await expect(writeClipboardText('copied from browser')).resolves.toBeUndefined()
+
+    expect(nativeWrite).toHaveBeenCalledOnce()
+    expect(nativeWrite).toHaveBeenCalledWith('copied from browser')
+  })
+
+  it('requests notification permission only from the explicit test action and preserves routing metadata', async () => {
+    let permission: NotificationPermission = 'default'
+    const requestPermission = vi.fn().mockImplementation(async () => {
+      permission = 'granted'
+      return permission
+    })
+    const notify = vi.fn()
+    vi.stubGlobal('Notification', Object.assign(notify, { requestPermission }))
+    Object.defineProperty(Notification, 'permission', { configurable: true, get: () => permission })
+
+    await expect(window.hermesDesktop.requestNotificationPermission?.()).resolves.toBe(true)
+    await expect(window.hermesDesktop.notify({ body: 'done', kind: 'turnDone', tag: 'session-a', title: 'Hermes' })).resolves.toBe(true)
+    expect(requestPermission).toHaveBeenCalledOnce()
+    expect(notify).toHaveBeenCalledWith('Hermes', expect.objectContaining({ body: 'done', tag: 'session-a' }))
+  })
+
+  it('releases a late wake lock if the preference is disabled before acquisition resolves', async () => {
+    let resolveLock!: (lock: { release: ReturnType<typeof vi.fn> }) => void
+    const release = vi.fn().mockResolvedValue(undefined)
+    Object.assign(navigator, {
+      wakeLock: { request: vi.fn(() => new Promise(resolve => { resolveLock = resolve })) }
+    })
+
+    window.hermesDesktop.setKeepAwake?.(true)
+    window.hermesDesktop.setKeepAwake?.(false)
+    resolveLock({ release })
+    await Promise.resolve()
+    expect(release).toHaveBeenCalledOnce()
+  })
+
+  it('releases while hidden, reacquires only after visibility returns, and contains rejected requests', async () => {
+    const firstRelease = vi.fn().mockResolvedValue(undefined)
+    const secondRelease = vi.fn().mockResolvedValue(undefined)
+    const request = vi.fn()
+      .mockResolvedValueOnce({ addEventListener: vi.fn(), release: firstRelease })
+      .mockRejectedValueOnce(new DOMException('denied', 'NotAllowedError'))
+      .mockResolvedValueOnce({ addEventListener: vi.fn(), release: secondRelease })
+    Object.assign(navigator, { wakeLock: { request } })
+    const visibility = vi.spyOn(document, 'visibilityState', 'get')
+
+    visibility.mockReturnValue('visible')
+    window.hermesDesktop.setKeepAwake?.(true)
+    await Promise.resolve()
+    await Promise.resolve()
+    expect(request).toHaveBeenCalledTimes(1)
+
+    visibility.mockReturnValue('hidden')
+    document.dispatchEvent(new Event('visibilitychange'))
+    await Promise.resolve()
+    expect(firstRelease).toHaveBeenCalledOnce()
+
+    visibility.mockReturnValue('visible')
+    document.dispatchEvent(new Event('visibilitychange'))
+    await Promise.resolve()
+    await Promise.resolve()
+    expect(request).toHaveBeenCalledTimes(2)
+
+    await Promise.resolve()
+    document.dispatchEvent(new Event('visibilitychange'))
+    await Promise.resolve()
+    await Promise.resolve()
+    expect(request).toHaveBeenCalledTimes(3)
+
+    window.dispatchEvent(new Event('pagehide'))
+    await Promise.resolve()
+    expect(secondRelease).toHaveBeenCalledOnce()
+
+    document.dispatchEvent(new Event('visibilitychange'))
+    await Promise.resolve()
+    expect(request).toHaveBeenCalledTimes(3)
+  })
+
+  it('routes a browser notification body click to its captured session and plugin activation', async () => {
+    const focus = vi.fn()
+    const activate = vi.fn()
+    const notification = vi.fn()
+    const focusWindow = vi.spyOn(window, 'focus').mockImplementation(() => {})
+    vi.stubGlobal('Notification', Object.assign(notification, { permission: 'granted' }))
+
+    const offFocus = window.hermesDesktop.onFocusSession?.(focus)
+    const offActivate = window.hermesDesktop.onNotificationActivate?.(activate)
+    await window.hermesDesktop.notify({
+      activate: '/index-network/intent/1', body: 'done', icon: 'https://example.com/icon.png', kind: 'plugin', notifyId: 'notice-1', sessionId: 'origin-session', silent: true, tag: 'index-network', title: 'Hermes'
+    })
+    const instance = notification.mock.instances[0] as Notification
+    instance.onclick?.(new Event('click'))
+
+    expect(notification).toHaveBeenCalledWith('Hermes', {
+      body: 'done', icon: 'https://example.com/icon.png', silent: true, tag: 'index-network'
+    })
+    expect(focus).toHaveBeenCalledWith('origin-session')
+    expect(activate).toHaveBeenCalledWith({ activate: '/index-network/intent/1', notifyId: 'notice-1', tag: 'index-network' })
+    expect(focusWindow).toHaveBeenCalledOnce()
+    offFocus?.()
+    offActivate?.()
+  })
+
+  it('reports browser battery data and removes its listener on disposal', async () => {
+    const listeners = new Map<string, EventListener>()
+    const battery = Object.assign(new EventTarget(), { charging: false, level: 0.4 })
+    const addEventListener = vi.spyOn(battery, 'addEventListener').mockImplementation((type, listener) => {
+      listeners.set(type, listener as EventListener)
+    })
+    const removeEventListener = vi.spyOn(battery, 'removeEventListener')
+    const getBattery = vi.fn(function (this: Navigator) {
+      if (this !== navigator) {
+        throw new Error('getBattery lost its navigator receiver')
+      }
+
+      return Promise.resolve(battery)
+    })
+    Object.assign(navigator, { getBattery })
+    const states: boolean[] = []
+
+    expect(await window.hermesDesktop.getOnBattery?.()).toBe(true)
+    const dispose = window.hermesDesktop.onBatteryChanged?.(onBattery => states.push(onBattery))
+    await Promise.resolve()
+    expect(addEventListener).toHaveBeenCalledWith('chargingchange', expect.any(Function))
+    battery.charging = true
+    listeners.get('chargingchange')?.(new Event('chargingchange'))
+    expect(states).toEqual([false])
+    dispose?.()
+    expect(removeEventListener).toHaveBeenCalledWith('chargingchange', expect.any(Function))
+  })
+
+  it('keeps the renderer battery fallback when the browser battery API is unavailable', async () => {
+    delete (navigator as { getBattery?: unknown }).getBattery
+
+    expect(await window.hermesDesktop.getOnBattery?.()).toBe(false)
+    const dispose = window.hermesDesktop.onBatteryChanged?.(vi.fn())
+
+    expect(() => dispose?.()).not.toThrow()
+  })
+
+  it('saves an image with a browser download without calling a gateway upload endpoint', async () => {
+    const click = vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => {})
+    const createObjectURL = vi.fn(() => 'blob:fixture')
+    const revokeObjectURL = vi.fn()
+    vi.stubGlobal('URL', Object.assign(URL, { createObjectURL, revokeObjectURL }))
+    vi.mocked(fetch).mockResolvedValue(new Response(new Blob(['image-bytes'], { type: 'image/png' })))
+
+    await expect(window.hermesDesktop.saveImageFromUrl('https://images.example/picture')).resolves.toBe(true)
+    expect(click).toHaveBeenCalledOnce()
+    expect(vi.mocked(fetch)).toHaveBeenCalledWith('https://images.example/picture', { credentials: 'omit' })
+    expect(vi.mocked(fetch).mock.calls.some(([input]) => String(input).includes('/api/fs/upload-image'))).toBe(false)
   })
 
   it('does not advertise native installers, windows or connection mutation', () => {

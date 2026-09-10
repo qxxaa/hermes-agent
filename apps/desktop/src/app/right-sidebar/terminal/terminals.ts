@@ -1,5 +1,6 @@
 import { atom, computed } from 'nanostores'
 
+import { hasDesktopCapability } from '@/lib/browser-capabilities'
 import { readKey, writeKey } from '@/lib/storage'
 import { $currentCwd } from '@/store/session'
 
@@ -196,6 +197,10 @@ export function ensureAgentTerminal(procId: string, title: string): string | nul
 /** Open + focus an agent process's tab (the status-stack link), recreating it if
  *  the user had closed it. Opens the pane. */
 export function openAgentTerminal(procId: string, title: string): void {
+  if (!hasDesktopCapability('terminal')) {
+    return
+  }
+
   surfacedProcs.add(procId)
   seedAgentTerminalCommand(procId, title)
   let id = findByProc(procId)?.id

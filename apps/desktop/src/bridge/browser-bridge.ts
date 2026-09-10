@@ -4,7 +4,9 @@
 import { buildHermesWebSocketUrl } from '@hermes/shared'
 import type { GatewayWsUrlResult } from '@hermes/shared'
 
-import type { DesktopConnectionConfig, HermesApiRequest, HermesConnection } from '@/global'
+import type { BrowserOperationScope, DesktopConnectionConfig, HermesApiRequest, HermesConnection } from '@/global'
+import { pickBrowserFiles } from '@/bridge/browser-files'
+import { startBrowserImageDownload } from '@/lib/browser-image-download'
 
 import { version } from '../../package.json'
 
@@ -13,9 +15,125 @@ const BROWSER_CONNECTION = 'browser'
 
 const unsubscribe = () => () => {}
 
+type BrowserBattery = EventTarget & { charging: boolean }
+type BrowserWakeLock = EventTarget & { release: () => Promise<void> }
+type BrowserNavigator = Navigator & { getBattery?: () => Promise<BrowserBattery> }
+
+let wakeLock: BrowserWakeLock | null = null
+let wakeRequested = false
+let wakeRequest: Promise<void> | null = null
+let wakeLockLifecycleInstalled = false
+const focusSessionSubscribers = new Set<(sessionId: string) => void>()
+const notificationActivateSubscribers = new Set<(payload: { actionId?: string; activate?: string; notifyId?: string; tag?: string }) => void>()
+
+function browserFsPath(endpoint: string, filePath: string): string {
+  return `/api/fs/${endpoint}?path=${encodeURIComponent(filePath)}`
+}
+
+async function setBrowserWakeLock(on: boolean): Promise<void> {
+  wakeRequested = on
+
+  if (!on) {
+    const lock = wakeLock
+    wakeLock = null
+    await lock?.release().catch(() => {})
+
+    return
+  }
+
+  const wake = navigator.wakeLock
+
+  if (!wake || document.visibilityState !== 'visible' || wakeLock || wakeRequest) {return}
+
+  wakeRequest = wake.request('screen').then(lock => {
+    if (!wakeRequested || document.visibilityState !== 'visible') {
+      return lock.release().catch(() => {})
+
+    }
+
+    wakeLock = lock
+    lock.addEventListener('release', () => {
+      if (wakeLock === lock) {wakeLock = null}
+    }, { once: true })
+  }).catch(() => {
+    // The preference remains desired, but rejection never claims an acquired lock.
+  }).finally(() => {wakeRequest = null})
+  await wakeRequest
+}
+
+function releaseBrowserWakeLock(): void {
+  const lock = wakeLock
+  wakeLock = null
+  void lock?.release().catch(() => {})
+}
+
+function installWakeLockLifecycle(): void {
+  if (wakeLockLifecycleInstalled) {
+    return
+  }
+
+  wakeLockLifecycleInstalled = true
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'visible') {
+      if (wakeRequested) {void setBrowserWakeLock(true)}
+
+      return
+    }
+
+    releaseBrowserWakeLock()
+  })
+  window.addEventListener('pagehide', () => {
+    wakeRequested = false
+    releaseBrowserWakeLock()
+  })
+}
+
+async function browserOnBattery(): Promise<boolean> {
+  const getBattery = (navigator as BrowserNavigator).getBattery
+
+  if (!getBattery) {return false}
+
+  return !(await getBattery.call(navigator)).charging
+}
+
+function onBrowserBatteryChanged(callback: (onBattery: boolean) => void): () => void {
+  const getBattery = (navigator as BrowserNavigator).getBattery
+
+  if (!getBattery) {return unsubscribe()}
+
+  let battery: BrowserBattery | null = null
+  let disposed = false
+  const onChange = () => callback(Boolean(battery && !battery.charging))
+
+  void getBattery.call(navigator).then((next: BrowserBattery) => {
+    if (disposed) {return}
+    battery = next
+    next.addEventListener('chargingchange', onChange)
+  })
+
+  return () => {
+    disposed = true
+    battery?.removeEventListener('chargingchange', onChange)
+  }
+}
+
 function authRequired(): boolean {
   // A missing bootstrap flag must not downgrade authentication.
   return window.__HERMES_AUTH_REQUIRED__ !== false
+}
+
+function browserNotificationIcon(icon?: string): string | undefined {
+  if (!icon) {
+    return undefined
+  }
+
+  try {
+    const url = new URL(icon)
+
+    return ['data:', 'http:', 'https:'].includes(url.protocol) ? url.href : undefined
+  } catch {
+    return undefined
+  }
 }
 
 function basePath(): string {
@@ -41,6 +159,16 @@ function websocketUrl(authParam?: readonly [string, string]): string {
 
 function checkConnectionId(id?: string | null) {
   if (id && id !== BROWSER_CONNECTION) {throw new Error('This browser client uses its own Hermes server only.')}
+}
+
+function browserUploadName(filename: string): string {
+  const leaf = filename.split(/[\\/]/).pop()?.replace(/[\0-\x1f<>:"|?*]/g, '_').trim()
+
+  return leaf || 'upload'
+}
+
+function browserUploadProfile(profile: string): string {
+  return profile.replace(/[^A-Za-z0-9._-]/g, '_') || 'default'
 }
 
 async function api<T>(request: HermesApiRequest): Promise<T> {
@@ -82,6 +210,43 @@ async function api<T>(request: HermesApiRequest): Promise<T> {
   if (/^\s*<(?:!doctype|html)/i.test(text)) {throw new Error(`Expected JSON from ${url.pathname}, received HTML.`)}
 
   return text ? JSON.parse(text) as T : null as T
+}
+
+async function uploadBrowserFile(file: Blob, filename: string, scope: BrowserOperationScope): Promise<string> {
+  checkConnectionId(scope.connectionId)
+  const managed = await api<{ path?: unknown; root?: unknown }>({ path: '/api/files', profile: scope.profile })
+  const uploadRoot = typeof managed.root === 'string' ? managed.root : managed.path
+
+  if (typeof uploadRoot !== 'string' || !uploadRoot.startsWith('/')) {
+    throw new Error('Hermes did not provide an absolute managed-files path.')
+  }
+
+  const safeName = browserUploadName(filename)
+  const path = `${uploadRoot.replace(/\/+$/, '')}/uploads/browser/${browserUploadProfile(scope.profile)}/${crypto.randomUUID()}/${safeName}`
+  const form = new FormData()
+  form.append('path', path)
+  form.append('overwrite', 'false')
+  form.append('file', file, safeName)
+  const url = new URL(browserServerUrl('/api/files/upload-stream'))
+  url.searchParams.set('profile', scope.profile)
+  const headers = new Headers()
+
+  if (!authRequired()) {headers.set('X-Hermes-Session-Token', sessionToken())}
+
+  const response = await fetch(url.href, {
+    body: form, credentials: 'same-origin', headers, method: 'POST', redirect: 'error', signal: AbortSignal.timeout(30_000)
+  })
+  const text = await response.text()
+
+  if (!response.ok) {throw new Error(`${response.status}: ${text || response.statusText}`)}
+
+  const result = JSON.parse(text) as { path?: unknown }
+
+  if (typeof result.path !== 'string' || !result.path.startsWith('/')) {
+    throw new Error('Hermes did not confirm an absolute upload path.')
+  }
+
+  return result.path
 }
 
 async function getConnection(profile?: string | null): Promise<HermesConnection> {
@@ -209,6 +374,90 @@ const bridge = {
 
     return { cwd: result.cwd, sanitized: true }
   },
+  readDir: async path => api({ path: browserFsPath('list', path) }),
+  readFileText: async path => api({ path: browserFsPath('read-text', path) }),
+  readFileDataUrl: async path => {
+    const result = await api<string | { dataUrl?: string }>({ path: browserFsPath('read-data-url', path) })
+
+    return typeof result === 'string' ? result : result.dataUrl || ''
+  },
+  uploadFile: uploadBrowserFile,
+  selectPaths: async (options, signal) => {
+    const profile = options?.profile || localStorage.getItem(PROFILE_KEY) || 'default'
+    const scope: BrowserOperationScope = { connectionId: BROWSER_CONNECTION, profile }
+
+    return pickBrowserFiles(options, scope, uploadBrowserFile, signal)
+  },
+  writeClipboard: async text => {
+    try {
+      await navigator.clipboard?.writeText(text)
+
+      return Boolean(navigator.clipboard)
+    } catch {
+      return false
+    }
+  },
+  readClipboard: async () => {
+    if (!navigator.clipboard?.readText) {throw new Error('Clipboard reading is unavailable.')}
+
+    return navigator.clipboard.readText()
+  },
+  requestMicrophoneAccess: async () => {
+    if (!navigator.mediaDevices?.getUserMedia) {return false}
+
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true })
+      stream.getTracks().forEach(track => track.stop())
+
+      return true
+    } catch {
+      return false
+    }
+  },
+  requestNotificationPermission: async () => {
+    if (typeof Notification === 'undefined') {return false}
+    if (Notification.permission === 'granted') {return true}
+    if (Notification.permission !== 'default') {return false}
+
+    return (await Notification.requestPermission()) === 'granted'
+  },
+  notify: async payload => {
+    if (typeof Notification === 'undefined' || Notification.permission !== 'granted') {return false}
+    const notification = new Notification(payload.title || 'Hermes', {
+      body: payload.body, icon: browserNotificationIcon(payload.icon), silent: payload.silent, tag: payload.tag
+    })
+    notification.onclick = () => {
+      window.focus()
+      if (payload.sessionId) {
+        for (const callback of focusSessionSubscribers) {callback(payload.sessionId)}
+      }
+      if (payload.activate || payload.notifyId) {
+        const activation = { activate: payload.activate, notifyId: payload.notifyId, tag: payload.tag }
+        for (const callback of notificationActivateSubscribers) {callback(activation)}
+      }
+    }
+
+    return true
+  },
+  onFocusSession: callback => {
+    focusSessionSubscribers.add(callback)
+
+    return () => focusSessionSubscribers.delete(callback)
+  },
+  onNotificationActivate: callback => {
+    notificationActivateSubscribers.add(callback)
+
+    return () => notificationActivateSubscribers.delete(callback)
+  },
+  setKeepAwake: on => {void setBrowserWakeLock(on)},
+  getOnBattery: browserOnBattery,
+  onBatteryChanged: onBrowserBatteryChanged,
+  saveImageFromUrl: async src => {
+    const headers = authRequired() ? undefined : { 'X-Hermes-Session-Token': sessionToken() }
+    await startBrowserImageDownload(src, { headers })
+
+    return true
+  },
   openExternal: async url => {
     const target = new URL(url, window.location.origin)
 
@@ -221,5 +470,6 @@ const bridge = {
 // merely the bridge object; a successful no-op would conceal an unavailable action.
 export function installBrowserBridge(): void {
   if (window.hermesDesktop) {return}
+  installWakeLockLifecycle()
   window.hermesDesktop = bridge as unknown as Window['hermesDesktop']
 }

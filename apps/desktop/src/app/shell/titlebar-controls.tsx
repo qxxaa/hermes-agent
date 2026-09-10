@@ -10,6 +10,7 @@ import { Button } from '@/components/ui/button'
 import { Tip, TipKeybindLabel } from '@/components/ui/tooltip'
 import { useI18n } from '@/i18n'
 import { compactNumber } from '@/lib/format'
+import { hasDesktopCapability } from '@/lib/browser-capabilities'
 import { triggerHaptic } from '@/lib/haptics'
 import { formatModifierToken } from '@/lib/keybinds/combo'
 import { cn } from '@/lib/utils'
@@ -231,6 +232,7 @@ export function TitlebarControls({ leftTools = [], tools = [], onOpenSettings }:
       // from the action registry, same as every other tool here.
       actionId: 'view.toggleHud',
       icon: <TitlebarIcon name="comment-discussion" />,
+      hidden: !hasDesktopCapability('hud'),
       id: 'hud',
       label: t.titlebar.enterHud,
       onSelect: () => {
