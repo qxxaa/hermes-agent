@@ -38,6 +38,7 @@ from .embedded import (
     _export_port_health_grace_timeout, _load_simple_env, _local_runtime_hint, _materialize_embedded_profile_env,
     _may_rewrite_profile_env,
 )
+from .knowledge import KNOWLEDGE_SCHEMAS, KNOWLEDGE_TOOL_HANDLERS
 from .settings import (
     _DEFAULT_API_URL, _DEFAULT_IDLE_TIMEOUT, _DEFAULT_LOCAL_URL, _DEFAULT_RETAIN_SOURCE,
     _DEFAULT_TIMEOUT, _HINDSIGHT_GLYPH, _MIN_CLIENT_VERSION, _MIN_VERSION_FOR_UPDATE_MODE_APPEND,
@@ -1144,7 +1145,9 @@ class HindsightMemoryProvider(MemoryProvider):
     # -- tools -------------------------------------------------------------------
 
     def get_tool_schemas(self) -> List[Dict[str, Any]]:
-        return [] if self._memory_mode == "context" else [RETAIN_SCHEMA, RECALL_SCHEMA, REFLECT_SCHEMA]
+        if self._memory_mode == "context":
+            return []
+        return [RETAIN_SCHEMA, RECALL_SCHEMA, REFLECT_SCHEMA, *KNOWLEDGE_SCHEMAS]
 
     def _tool_retain(self, args: dict) -> str:
         content, context = args["content"], args.get("context")
@@ -1172,19 +1175,20 @@ class HindsightMemoryProvider(MemoryProvider):
         logger.debug("Tool hindsight_reflect: response_len=%d", len(text))
         return text or "No relevant memories found."
 
-    # tool name -> (required arg, handler, user-facing failure prefix)
+    # tool name -> (required args, handler, user-facing failure prefix)
     _TOOL_HANDLERS = {
-        "hindsight_retain": ("content", _tool_retain, "Failed to store memory"),
-        "hindsight_recall": ("query", _tool_recall, "Failed to search memory"),
-        "hindsight_reflect": ("query", _tool_reflect, "Failed to reflect"),
+        "hindsight_retain": (("content",), _tool_retain, "Failed to store memory"),
+        "hindsight_recall": (("query",), _tool_recall, "Failed to search memory"),
+        "hindsight_reflect": (("query",), _tool_reflect, "Failed to reflect"),
+        **KNOWLEDGE_TOOL_HANDLERS,
     }
 
     def handle_tool_call(self, tool_name: str, args: dict, **kwargs) -> str:
         if tool_name not in self._TOOL_HANDLERS:
             return tool_error(f"Unknown tool: {tool_name}")
         required, handler, failure = self._TOOL_HANDLERS[tool_name]
-        if not args.get(required, ""):
-            return tool_error(f"Missing required parameter: {required}")
+        if missing := next((name for name in required if not args.get(name, "")), None):
+            return tool_error(f"Missing required parameter: {missing}")
         try:
             return json.dumps({"result": handler(self, args)})
         except Exception as e:

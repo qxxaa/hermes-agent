@@ -111,7 +111,7 @@ LAZY_DEPS: dict[str, tuple[str, ...]] = {
     # made _is_satisfied() reject every newer compatible release, so `hermes update` (and the hindsight
     # plugin's own >=_MIN_CLIENT_VERSION auto-upgrade) kept downgrading a working 0.9.x client to 0.6.1
     # and broke embedded daemons whose DB a newer client had migrated (#86992, #39424, #98407).
-    "memory.hindsight": ("hindsight-client>=0.6.1,<1",),
+    "memory.hindsight": ("hindsight-client>=0.10.1,<1",),
     # Cloud memory SDKs MUST be allowlisted + ensure()'d at the import site, or they never
     # install on the sealed Docker image (durable-target only).
     "memory.supermemory": ("supermemory==3.50.0",),

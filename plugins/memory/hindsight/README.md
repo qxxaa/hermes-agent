@@ -149,6 +149,13 @@ Available in `hybrid` and `tools` memory modes:
 | `hindsight_retain` | Store information with auto entity extraction; supports optional per-call `tags` |
 | `hindsight_recall` | Multi-strategy search (semantic + entity graph) |
 | `hindsight_reflect` | Cross-memory synthesis (LLM-powered) |
+| `hindsight_knowledge_list` | List the knowledge base's folder and page tree |
+| `hindsight_knowledge_search` | Find knowledge pages by topic |
+| `hindsight_knowledge_get` | Read a knowledge page in full |
+| `hindsight_knowledge_create_page` | Create a self-maintaining page answering one question; optional refresh interval |
+| `hindsight_knowledge_create_folder` | Create a folder to organise pages |
+| `hindsight_knowledge_update` | Rename or move a page or folder, or change a page's question or refresh interval |
+| `hindsight_knowledge_delete` | Delete a page, or a folder and everything in it |
 
 ## Environment Variables
 
@@ -164,4 +171,4 @@ Available in `hybrid` and `tools` memory modes:
 
 ## Client Version
 
-Requires `hindsight-client >= 0.6.1`. The plugin auto-upgrades on session start if an older version is detected.
+Requires `hindsight-client >= 0.10.1`. The plugin auto-upgrades on session start if an older version is detected.
