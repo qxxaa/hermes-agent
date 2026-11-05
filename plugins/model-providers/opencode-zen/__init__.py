@@ -115,11 +115,26 @@ class OpenCodeZenProfile(ProviderProfile):
     ) -> tuple[dict[str, Any], dict[str, Any]]:
         return re_.ox_alpha_reasoning_extras(reasoning_config, model)
 
+    def replay_message_carriers(self, values: dict[str, Any], *, model: str | None, base_url: str) -> dict[str, Any]:
+        if not values.get("reasoning_opaque"):
+            return {}
+        out = {"reasoning_opaque": values["reasoning_opaque"]}
+        if values.get("reasoning_text"):
+            out["reasoning_text"] = values["reasoning_text"]
+        return out
+
+    def replays_function_thought_signature(self, *, model: str | None, base_url: str) -> bool:
+        return True
+
 
 opencode_zen = OpenCodeZenProfile(
     name="opencode-zen", aliases=("opencode", "opencode_zen", "zen"), env_vars=("OPENCODE_ZEN_API_KEY",),
     base_url="https://opencode.ai/zen/v1", default_headers=LazyHeaders(_ATTRIBUTION_HEADERS),
     default_aux_model="gemini-3-flash",
+    hostnames=("excalibur", "githubcopilot.com", "opencode.ai"),
+    message_carrier_opaque="reasoning_opaque",
+    message_carrier_text="reasoning_text",
+    replays_tool_call_signatures=True,
 )
 
 opencode_go = OpenCodeGoProfile(
